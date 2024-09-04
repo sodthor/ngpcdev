@@ -1,0 +1,17 @@
+	db	0c3h,010h,00h,01h,00h,00h,00h,00h,00h,00h,00h,00h,00h,09fh,0bfh,0dfh
+	db	031h,00h,010h,03ah,03h,00h,0b7h,028h,0fah,0d6h,01h,028h,036h,0afh,032h,03h
+	db	00h,021h,01h,040h,03ah,07h,00h,077h,03ah,08h,00h,077h,03ah,0dh,00h,077h
+	db	02bh,077h,023h,03ah,09h,00h,077h,03ah,0ah,00h,077h,03ah,0eh,00h,077h,02bh
+	db	077h,023h,03ah,0bh,00h,077h,03ah,0ch,00h,077h,03ah,0fh,00h,077h,02bh,077h
+	db	0c3h,013h,00h,032h,03h,00h,021h,0dh,00h,0e5h,03eh,080h,0f5h,0f5h,021h,04h
+	db	00h,0e5h,0cdh,089h,00h,0c3h,013h,00h,021h,0eh,00h,0e5h,03eh,0a0h,0f5h,0f5h
+	db	021h,05h,00h,0e5h,0cdh,089h,00h,021h,0fh,00h,0e5h,03eh,0c0h,0f5h,0f5h,021h
+	db	06h,00h,0e5h,0cdh,089h,00h,0c3h,013h,00h,0d1h,06h,00h,0e1h,04eh,0cbh,021h
+	db	021h,0a8h,00h,09h,0f1h,0b6h,023h,046h,021h,00h,040h,077h,070h,0f1h,047h,0f1h
+	db	0f6h,010h,080h,077h,023h,077h,0d5h,0c9h,08h,036h,07h,033h,09h,030h,0dh,02dh
+	db	04h,02bh,0dh,028h,09h,026h,06h,024h,05h,022h,06h,020h,09h,01eh,0eh,01ch
+	db	04h,01bh,0bh,019h,04h,018h,0eh,016h,09h,015h,06h,014h,04h,013h,03h,012h
+	db	02h,011h,03h,010h,04h,0fh,07h,0eh,0ah,0dh,0dh,0ch,02h,0ch,07h,0bh
+	db	0dh,0ah,03h,0ah,0ah,09h,01h,09h,09h,08h,01h,08h,0ah,07h,03h,07h
+	db	0dh,06h,06h,06h,01h,06h,0bh,05h,06h,05h,01h,05h,0dh,04h,08h,04h
+	db	04h,04h,00h,04h,0dh,03h,09h,03h,06h,03h,03h,03h,00h,03h,

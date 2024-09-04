@@ -1,0 +1,6 @@
+CHARSET
+	db	0280h,0aa0h,02ba8h,0afaah,0aaa9h,01a94h,0280h,0aa0h
+ENDCHARSET
+PALETTE
+	db	00h,0707h,0f0fh,0fffh,
+ENDPALETTE

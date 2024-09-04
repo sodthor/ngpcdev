@@ -1,0 +1,6 @@
+CHARSET
+	dw 00280h, 00aa0h, 02aa8h, 0aaa9h, 0aea9h, 0afa9h, 02aa4h, 00550h
+ENDCHARSET
+PALETTE
+	dw 00000h, 00700h, 00f00h, 00fffh
+ENDPALETTE
