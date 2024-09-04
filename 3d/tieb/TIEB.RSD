@@ -1,0 +1,10 @@
+#
+#  created by 3DS2RSD on Tue Nov  6 11:39:41 2001
+#   3DS2RSD (c) Copyright SCE 1995
+@RSD940102
+PLY=tieb.ply
+MAT=tieb.mat
+GRP=tieb.grp
+#
+NTEX=0
+#
