@@ -1,0 +1,20 @@
+XX:main menu : play
+XX:scenario
+NO:credits
+NO:niveau easy medium hard
+XX:random enmy type/power/count + bonus
+XX:refaire niveau
+XX:intro boss
+XX:move boss
+NO:hiscore : show/enter
+NO:music ?
+XX:courbe boss
+XX:tir bleus
+XX:ending
+XX:score
+XX:shoots boss
+XX:life > ?
+XX:courbes ennemies
+OK:correction bug up/down
+OK:verif ref sponsor sur pdroms.com
+OK:Test HARDWARE
