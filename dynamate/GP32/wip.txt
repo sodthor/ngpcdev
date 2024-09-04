@@ -1,0 +1,22 @@
+PRIVATE 32
+----------
+* added : frameskip option
+* fixed : options (zoom, frameskip, ..) are saved when closing program
+
+PRIVATE 31
+----------
+* added : LCD scanline + DMA emulation (for wicked.fxe, offscr.fxe, scr1.fxe)
+* added : DMA0 emulation (for mummu.fxe)
+* added : cheat finder window (alpha stage)
+
+PRIVATE 26
+----------
+* fixed : when you pressed a key, smc emulation could get corrupted, resulting in a crash
+* added : controls are now configurable
+* fixed : memory editor page up/down moved only 1 row instead of whole page
+
+PRIVATE 25
+----------
+* SMC emulation works directly on virtual smc file instead of being loaded into mem, no caching yet.
+* Improved IIC emulation to make pacrom firmware run (very long IIC read time for now).
+  Simply place a IIC.BIN file in the same dir as the emu, I've included my own to get you started.
