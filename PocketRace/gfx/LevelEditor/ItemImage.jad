@@ -1,0 +1,102 @@
+// Decompiled by DJ v3.0.0.63 Copyright 2002 Atanas Neshkov  Date: 19/08/2002 11:01:11
+// Home Page : http://members.fortunecity.com/neshkov/dj.html  - Check often for new version!
+// Decompiler options: packimports(3) 
+// Source File Name:   ItemImage.java
+
+package LevelEditor;
+
+import java.awt.*;
+
+// Referenced classes of package LevelEditor:
+//            FrameLevelEditor, PanelImage
+
+public class ItemImage
+{
+
+    public ItemImage()
+    {
+        selected = false;
+        if(defImg == null)
+            defImg = PanelImage.loadImage("LevelEditor\\default.jpg");
+        setImage(defImg);
+        imgName = "LevelEditor\\default.jpg";
+    }
+
+    public void setImage(Image image)
+    {
+        img = image;
+    }
+
+    public Image getImage()
+    {
+        return img;
+    }
+
+    public String getImageName()
+    {
+        return imgName;
+    }
+
+    public void paint(Graphics g, int i, int j, int k, int l)
+    {
+        if(img != null && g != null)
+        {
+            g.drawImage(img, i * k, j * l, i * k + k, j * l + l, 0, 0, img.getWidth(null), img.getHeight(null), null);
+            if(selected)
+            {
+                int i1 = i * k + k / 2;
+                int j1 = j * l + l / 2;
+                g.setColor(Color.green);
+                g.drawRect(i1, j1, 2, 2);
+                g.setColor(Color.red);
+                g.drawRect(i1 - 1, j1 - 1, 4, 4);
+                g.setColor(Color.blue);
+                g.drawRect(i1 - 2, j1 - 2, 6, 6);
+                g.setColor(Color.red);
+                g.drawRect(i1 - 3, j1 - 3, 8, 8);
+                g.setColor(Color.green);
+                g.drawRect(i1 - 4, j1 - 4, 10, 10);
+            }
+        }
+    }
+
+    void select()
+    {
+        selected = !selected;
+    }
+
+    boolean isSelected()
+    {
+        return selected;
+    }
+
+    PanelImage getLink()
+    {
+        return link;
+    }
+
+    void clear()
+    {
+        setLink(null);
+    }
+
+    void setLink(PanelImage panelimage)
+    {
+        link = panelimage;
+        if(panelimage != null)
+        {
+            setImage(panelimage.getImage());
+            return;
+        } else
+        {
+            setImage(defImg);
+            return;
+        }
+    }
+
+    static Image defImg;
+    Image img;
+    String imgName;
+    private boolean selected;
+    PanelImage link;
+}
