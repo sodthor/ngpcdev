@@ -1,0 +1,30 @@
+#////////////////////////////////////////////////////////////////////////////#
+#/ SODChess                                                                 /#
+#////////////////////////////////////////////////////////////////////////////#
+.SUFFIXES: .c .asm .rel .abs .wav
+DF = ..\DF
+NAME = sodchess
+OBJS = \
+	$(DF)\crt0.rel $(DF)\crt1.rel $(DF)\stdio.rel \
+	sodchess.rel memcpy.rel random.rel book.rel eatdot.rel \
+	ngpc.rel rsonic.rel
+
+$(NAME).ngp: makefile $(DF)/ngpc.lcf $(DF)/system.lib $(OBJS) rsonic.c
+	tulink -la -o $(NAME).abs $(DF)/ngpc.lcf $(DF)/system.lib c900ml.lib $(OBJS)
+	tuconv -Fs24 $(NAME).abs
+	s242ngp $(NAME).s24
+
+.c.rel:
+	cc900 -DNGPC -I$(DF) -c -O3 -l $< -o $@
+
+.asm.rel:
+	asm900 -l $< -o $@
+
+.wav.rel:
+	wav2c $<
+
+.wav.c:
+	wav2c $<
+
+clean:
+	del /s /q *.rel *.abs *.map *.lst *.s24 *.ngp

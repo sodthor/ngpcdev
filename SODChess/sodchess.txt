@@ -1,0 +1,33 @@
+Here is the version 1.02 of SOD Chess.
+
+What's new (June,20,2002):
+	bugs fixes
+	A bit faster
+	New progress bar animation (very important !)
+	
+
+What's new (June,10,2002):
+	bugs fixes
+	Last move is highlighted (Fuz request)
+	VBL based sleep fct (Fuz request)
+
+It's always very very slow, I know (the progress bar show you that your NGPC is not dead).
+It's not a good chess player : 1200 Elo max (a beginner)
+It includes a small opening book (90% of the rom size).
+Promotion only restore the strongest lost figure (Q,R,B,N).
+
+Buttons :
+
+A	: Choose and move
+B	: Flip board (You play Black if you flip at the beginning or after reset)
+Option	: Reset game
+
+Next version : stronger & faster (I hope,once again).
+
+Greetings to :
+
+Ivan (the best of us), Dark Fader(yes, I use your "eatdot" pacman sound and C basics).
+Roger Bacon, Mr Spiv, Flavor, N!k, Fuz, Madxx (my lazy artist), Lindon, Chris.
+(If someone else is working on NGP let me know what the hell you are doing !)
+
+THOR / Shadow Of Dawn
