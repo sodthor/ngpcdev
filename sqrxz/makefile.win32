@@ -1,0 +1,44 @@
+# binutils and compiler
+MINGW = c:/MinGW32
+SDL = $(MINGW)/SDL-1.2.15
+PREFIX := $(MINGW)/bin/
+CC = $(PREFIX)gcc
+CPP = $(PREFIX)g++
+LD = $(PREFIX)gcc
+AS = $(PREFIX)as
+AR = $(PREFIX)ar
+RES = $(PREFIX)windres
+
+# name
+PRG = sqrxz_win32.exe
+
+LIBS = -L$(MINGW)/lib $(SDL)/lib/libSDLmain.a $(SDL)/lib/libSDL.dll.a $(MINGW)/lib/gcc/i686-w64-mingw32/7.1.0/libstdc++.a -lopengl32
+LDFLAGS = -mwindows -s -Wall -Wl,-Map,$(PRG).map,-u,_WinMain@16 -flto
+
+INCLUDES = -I$(MINGW)/include -I$(SDL)/include/SDL -I$(MIXER)/include -I$(MODPLUG)/src -I. -I./src
+OPTIM = -ffast-math -funroll-loops -fomit-frame-pointer -momit-leaf-frame-pointer -fmessage-length=0 -O3
+CFLAGS = $(INCLUDES) $(OPTIM) -DWIN32 -DGCC -s -Wall -pedantic
+
+OBJS = \
+	main.o \
+	flash.o \
+	music.o \
+	img.o \
+	hicolor.o \
+	library.o \
+	win32.o
+
+%.o: %.rc
+	$(RES) $< $@
+
+all: $(OBJS)
+	$(LD) $(LDFLAGS) $(OBJS) $(LIBS) -o $(PRG)
+
+clean:
+	del $(OBJS) $(PRG).map $(PRG)
+
+%.o: %.cpp
+	$(CPP) $(CFLAGS) -o $@ -c $<
+
+%.o: %.c
+	$(CC) $(CFLAGS) -o $@ -c $<
