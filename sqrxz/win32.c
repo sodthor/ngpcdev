@@ -4,6 +4,15 @@
 #include "debug.h"
 #include "types.h"
 
+#ifndef GCC
+#include <stdio.h>
+FILE _iob[3];
+FILE * __iob_func(void)
+{
+	return _iob;
+}
+#endif
+
 u8 MEM_6f83;
 u8 MEM_6da0;
 
@@ -52,6 +61,9 @@ u8 MEM_SPRITE_RAM[256];
 u8 MEM_SPRITE_COLOUR[64];
 u8 MEM_Z80_RAM[4096];
 
+u8 Z80_NMI;
+u8 Z80_COM;
+
 SDL_Surface *screen = NULL;
 SDL_Surface *plane1 = NULL;
 SDL_Surface *plane2 = NULL;
@@ -61,8 +73,8 @@ SDL_Surface* sprTiles[64];
 Uint32 colorKey;
 
 #define MAX_FRAME_SKIP 2
-#define MSEC_SINGLE_FRAME 20
-#define MSEC_GROUP_FRAME  60
+#define MSEC_SINGLE_FRAME 17
+#define MSEC_GROUP_FRAME  50
 
 unsigned long fpsRefTick;
 unsigned long fpsCurTick;
@@ -79,11 +91,15 @@ unsigned long fpsSamples = 0;
 void initFPS();
 void controlFPS();
 
-#define ZOOM 1
+#define ZOOM 2
 
 void initVideo() {
 	int i;
-
+#ifndef GCC
+	_iob[0] = *stdin;
+	_iob[1] = *stdout;
+	_iob[2] = *stderr;
+#endif
 	SDL_Init(SDL_INIT_VIDEO);
 	SDL_putenv("SDL_VIDEO_WINDOW_POS=center");
 
@@ -151,16 +167,23 @@ void blitImage(SDL_Surface* src, int x, int y, SDL_Surface* dst)
     SDL_BlitSurface(src, &srcrect, dst, &dstrect);
 }
 
-void blitImageLoop(SDL_Surface* src, int x, int y, SDL_Surface* dst)
+void blitImageLoop(SDL_Surface* src, int x0, int y0, SDL_Surface* dst)
 {
     SDL_Rect srcrect, dstrect;
+	int x, y;
 	srcrect.x = 0;
 	srcrect.y = 0;
 	srcrect.w = src->w;
 	srcrect.h = src->h;
-	for (dstrect.y = y; dstrect.y < dst->h; dstrect.y += src->h)
-		for (dstrect.x = x; dstrect.x < dst->w; dstrect.x += src->w)
+	for (y = y0; y < dst->h; y += src->h)
+	{
+		for (x = x0; x < dst->w; x += src->w)
+		{
+			dstrect.x = x;
+			dstrect.y = y;
 			SDL_BlitSurface(src, &srcrect, dst, &dstrect);
+		}
+	}
 }
 
 u16 mapRGB(u16 color)
@@ -283,9 +306,19 @@ void flipScreen()
 			fillTile(sprTiles[i], tileID, MEM_SPRITE_PALETTE + (MEM_SPRITE_COLOUR[i] << 2), hFlip, vFlip);
 		}
 	}
-	for (i = 63; i >= 0; i--)
+	for (i = 63; i >= 0; --i)
+	{
 		if (prio[i] > 0)
+		{
 			blitImage(sprTiles[i], x[i] * ZOOM, y[i] * ZOOM, planeS[prio[i] - 1]);
+			if (x[i] > 248)
+				blitImage(sprTiles[i], (x[i] - 256) * ZOOM, y[i] * ZOOM, planeS[prio[i] - 1]);
+			if (y[i] > 248)
+				blitImage(sprTiles[i], x[i] * ZOOM, (y[i] - 256) * ZOOM, planeS[prio[i] - 1]);
+			if (x[i] > 248 && y[i] > 248)
+				blitImage(sprTiles[i], (x[i] - 256) * ZOOM, (y[i] - 256) * ZOOM, planeS[prio[i] - 1]);
+		}
+	}
 
 	blitImageLoop(planeS[0], -SPR_X * ZOOM, -SPR_Y * ZOOM, screen);
 	if (SCRL_PRIO == 0)
@@ -414,7 +447,7 @@ int RIGHT_KEY = SDLK_RIGHT;
 int UP_KEY = SDLK_UP;
 int DOWN_KEY = SDLK_DOWN;
 
-#define done USR_SHUTDOWN
+int done = 0;
 #define lastKey JOYPAD
 int lastKeyTyped;
 int lastKeySym;
@@ -687,6 +720,3 @@ void checkInput()
         }
     }
 }
-
-
-

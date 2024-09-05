@@ -1,0 +1,15 @@
+; Format: tile, spr1,spr2...
+; Main character
+-1, 0,1,2,3,4
+; Crab
+-1, 8,9,10,11
+; Bug
+-1, 12,13
+; Skull
+-1, 16,17,18,19
+; Fish
+102, 14,15
+; Bat
+-1, 20,21,22
+; Bomb
+102, 5,6,7

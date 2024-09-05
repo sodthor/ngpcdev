@@ -1,6 +1,7 @@
 # binutils and compiler
 MINGW = c:/MinGW32
 SDL = $(MINGW)/SDL-1.2.15
+MIXER = $(MINGW)/SDL_mixer-1.2.12
 PREFIX := $(MINGW)/bin/
 CC = $(PREFIX)gcc
 CPP = $(PREFIX)g++
@@ -12,10 +13,10 @@ RES = $(PREFIX)windres
 # name
 PRG = sqrxz_win32.exe
 
-LIBS = -L$(MINGW)/lib $(SDL)/lib/libSDLmain.a $(SDL)/lib/libSDL.dll.a $(MINGW)/lib/gcc/i686-w64-mingw32/7.1.0/libstdc++.a -lopengl32
+LIBS = -L$(MINGW)/lib $(SDL)/lib/libSDLmain.a $(SDL)/lib/libSDL.dll.a $(MIXER)/lib/x86/SDL_mixer.lib $(MINGW)/lib/gcc/i686-w64-mingw32/7.1.0/libstdc++.a -lopengl32
 LDFLAGS = -mwindows -s -Wall -Wl,-Map,$(PRG).map,-u,_WinMain@16 -flto
 
-INCLUDES = -I$(MINGW)/include -I$(SDL)/include/SDL -I$(MIXER)/include -I$(MODPLUG)/src -I. -I./src
+INCLUDES = -I$(MINGW)/include -I$(SDL)/include/SDL -I$(MIXER)/include -I. -I./src
 OPTIM = -ffast-math -funroll-loops -fomit-frame-pointer -momit-leaf-frame-pointer -fmessage-length=0 -O3
 CFLAGS = $(INCLUDES) $(OPTIM) -DWIN32 -DGCC -s -Wall -pedantic
 
@@ -26,6 +27,9 @@ OBJS = \
 	img.o \
 	hicolor.o \
 	library.o \
+	sound.o \
+	neopopsound.o \
+	z80.o \
 	win32.o
 
 %.o: %.rc

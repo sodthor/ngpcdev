@@ -1,5 +1,7 @@
-#ifndef _IMG_LIB
-#define _IMG_LIB
+#ifndef _IMG_H
+#define _IMG_H
+
+#include "types.h"
 
 #define CENTER 0xff
 
@@ -16,8 +18,13 @@ typedef struct sod_img
   u16* p2;
   u8*  pi1;
   u8*  pi2;
+  u16* idx1;
+  u16* idx2;
+  u16* flip1;
+  u16* flip2;
+  u16  empty;
 } SOD_IMG;
 
-void showImage(u16,SOD_IMG*,u8,u8);
+void showImage(SOD_IMG* img, u8 x, u8 y, u16* plane, u16 tileOffset, u16* palette, u8 paletteOffset);
 
 #endif

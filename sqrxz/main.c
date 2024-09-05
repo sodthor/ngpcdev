@@ -1,30 +1,40 @@
 #include "ngpc.h"
 #ifdef WIN32
-#ifndef GCC
-#include <stdio.h>
-FILE _iob[] = { NULL, NULL, NULL };
-FILE * __iob_func(void)
-{
-    return _iob;
-}
-#endif
-#include <SDL.h>
-#include <SDL_types.h>
 #include "win32.h"
 #else
 #include "carthdr.h"
 #define NULL 0L
 #define LOGGER(S)
+u8 done = 0;
 #endif
 
 #include "library.h"
+#include "img.h"
 
 #include "music.h"
 #include "magical0.mh"
+#include "defletest.h"
+#include "burning_town.h"
+#include "exception.h"
+#include "mastertracker.h"
+#include "aladdin01.h"
+#include "gng13.h"
 
 #include "blocks.h"
 #include "sprites.h"
+#include "logo.h"
+#include "font.h"
+
 #include "sprites_prio.h"
+
+typedef enum {
+	BACKGROUND = 0,
+	SOLID,
+	LETHAL,
+	CRATE,
+	WATER,
+	BLOCK_TYPE_COUNT
+} BLOCK_TYPE;
 
 const u8 blocks_type[544] = {
 1,1,1,1,1,1,1,1,1,1,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
@@ -39,10 +49,10 @@ const u8 blocks_type[544] = {
 1,1,0,0,0,0,0,0,0,0,2,2,2,2,2,2,0,0,0,0,0,0,0,0,1,1,1,1,0,0,1,1,1,1,
 1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
 1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
-0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,
-0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,
-0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,
-0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0
+4,4,1,1,1,1,0,0,0,0,4,4,4,4,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,
+4,4,1,1,1,1,0,0,0,0,4,4,4,4,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,
+0,0,0,0,4,4,4,4,4,4,4,4,4,4,0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,
+0,0,0,0,4,4,4,4,4,4,4,4,4,4,0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0
 };
 
 typedef enum {
@@ -131,22 +141,49 @@ typedef struct {
 #define MAX(a,b) ((a)>(b)?(a):(b))
 #define MIN(a,b) ((a)<(b)?(a):(b))
 
+typedef struct {
+	u16 *tiles;
+	u16 *flip;
+	ANIMATED_TILE* animated;
+	u16 animCount;
+	SPRITE_POS* sprites;
+	u16 sprCount;
+	u16* priority;
+	u16 used;
+	u16 width;
+	u16 height;
+} LEVEL;
+
 #define LEVEL_COUNT 1
 
-#define RESERVED 396
-s16 set_level[BLOCKS_TILES_COUNT];
-u16 used_level[BLOCKS_TILES_COUNT];
-u16 new_tiles[RESERVED];
-#define SPR_RESERVED 512-RESERVED-1
-s16 set_sprites[SPRITES_TILES_COUNT];
-u16 used_sprites[SPRITES_TILES_COUNT];
+const LEVEL LEVELS[LEVEL_COUNT] = {
+	{
+		(u16*)LEVEL0,
+		(u16*)LEVEL0_FLIP,
+		(ANIMATED_TILE*)LEVEL0_ANIMS,
+		LEVEL0_ANIM_COUNT,
+		(SPRITE_POS*)LEVEL0_SPRITES,
+		LEVEL0_SPRITE_COUNT,
+		(u16*)LEVEL0_PRIORITY,
+		LEVEL0_USED,
+		LEVEL0_WIDTH,
+		LEVEL0_HEIGHT
+	}
+};
 
 u16 level_dx, level_dy;
+u16 level_w, level_h;
 u16* level; // tiles
 u16* flevel; // flip flags
 u16* plevel; // palettes
 u16 level_used; // tiles used
 u16 aclevel; // animation count
+
+#define RESERVED 396
+s16 set_level[BLOCKS_TILES_COUNT];
+u16 used_level[BLOCKS_TILES_COUNT];
+s16 set_sprites[SPRITES_TILES_COUNT];
+u16 used_sprites[SPRITES_TILES_COUNT];
 
 s16 followDir;
 u16 followCount;
@@ -156,19 +193,26 @@ s16 followDY;
 
 u8 lastSpr; // sprite count
 
+#define MAX_AIR 512
+#define ALERT_AIR 240
+
 typedef struct entity {
     s16 x, y;
-    u8 id; // entity id
+	u8 id; // entity id
     u8 spr; // top left sprite
     u8 vis; // visible
     u8 anim;
     u8 dead;
     u8 active;
-    s16 dx; // -1: right to left, 1: left to right, 0: inactive
-    s16 dy; // <0: jump, >0: falling, 0: horizontal
+	s16 dx; // -1: right to left, 1: left to right, 0: inactive
+	s16 dy; // <0: jump, >0: falling, 0: horizontal
 } ENTITY;
 
+u8 lives;
+u16 time;
+u16 air;
 ENTITY player;
+
 #define MAX_ENEMIES 32
 ENTITY enemies[MAX_ENEMIES];
 u8 enemy_count;
@@ -188,12 +232,15 @@ typedef struct {
 #define MAX_ANIMATIONS 64
 ANIMATION animations[MAX_ANIMATIONS];
 
+#define ANIM_FRAME(t) anim_frames[animations[t&0x3f].id][(t&0x300)>>8][animations[t&0x3f].frame]
+#define ANIM_TILE(t) (((t!=0xffff) && (t&0x8000)) ? ANIM_FRAME(t) : t)
+
 void __interrupt myVBL()
 {
 //SetBackgroundColour(RGB(15, 0, 0));
     WATCHDOG = WATCHDOG_CLEAR;
     if (USR_SHUTDOWN) { SysShutdown(); while (1); }
-    VBCounter++;
+	VBCounter++;
 }
 
 void preloadTiles(s16 *ref_block, u16 tiles_count, u16 tiles_start, u16 tiles_max, u16* tiles, u16* idx1, u16* idx2, u16* priority, u16 used) {
@@ -242,10 +289,10 @@ void initTiles()
 
     for (i=0;i<SPRITES_NPALS1*4;++i) {
         pal3[i] = SPRITES_PALS1[i];
-        pal3[i+32] = SPRITES_PALS2[i];
+        pal3[i + SPRITES_NPALS1 * 4] = SPRITES_PALS2[i];
     }
 
-    preloadTiles(set_sprites, SPRITES_TILES_COUNT, 1, 512-RESERVED-1, (u16*)SPRITES_TILES, (u16*)SPRITES_IDX1, (u16*)SPRITES_IDX2, (u16*)SPRITES_PRIORITY, SPRITES_TILES_COUNT-1);
+    preloadTiles(set_sprites, SPRITES_TILES_COUNT, 1, 512-RESERVED-1, (u16*)SPRITES_TILES, (u16*)SPRITES_IDX1, (u16*)SPRITES_IDX2, (u16*)SPRITES_PRIORITY, 256);
     preloadTiles(set_level, BLOCKS_TILES_COUNT, 512-RESERVED, RESERVED, (u16*)BLOCKS_TILES, (u16*)BLOCKS_IDX1, (u16*)BLOCKS_IDX2, plevel, level_used);
 }
 
@@ -276,16 +323,16 @@ void loadTileRam(s16 *ref_block, u16 tiles_start, u16* tiles, u16* priority, u16
     }
 }
 
-u16 addNewTiles(u16 startX, u16 endX, u16 startY, u16 endY, u16 nt, u8 absolute) {
+u16 addNewTiles(u16 startX, u16 endX, u16 startY, u16 endY, u16 nt, u8 absolute, u16* new_tiles) {
     u16 i, j, t, b;
-    u16 k = absolute ? (startX * LEVEL0_HEIGHT) : ((level_dx + startX) * LEVEL0_HEIGHT + level_dy);
+    u16 k = absolute ? (startX * level_h) : ((level_dx + startX) * level_h + level_dy);
 
     for (i = startX; i < endX; ++i) {
         for (j = startY; j < endY; ++j) {
             t = level[k+j];
             if (t != 0xffff) {
                 if (t&0x8000) {
-                    t = anim_frames[animations[t&0xff].id][(t&0x300)>>8][animations[t&0xff].frame];
+                    t = ANIM_FRAME(t);
                     if (t == 0xffff)
                         continue;
                 }
@@ -297,14 +344,14 @@ u16 addNewTiles(u16 startX, u16 endX, u16 startY, u16 endY, u16 nt, u8 absolute)
                     new_tiles[nt++] = b;
             }
         }
-        k += LEVEL0_HEIGHT;
+        k += level_h;
     }
     return nt;
 }
 
 void fillPlanes(u16 startX, u16 endX, u16 startY, u16 endY, u8 absolute) {
     u16 i, j;
-    u16 k = absolute ? (startX * LEVEL0_HEIGHT) : ((level_dx + startX) * LEVEL0_HEIGHT + level_dy);
+    u16 k = absolute ? (startX * level_h) : ((level_dx + startX) * level_h + level_dy);
     u16 d, t;
     u16 dy = absolute ? (startY << 5) : ((level_dy + startY) << 5);
     u16 *scrp1 = SCROLL_PLANE_1;
@@ -314,39 +361,29 @@ void fillPlanes(u16 startX, u16 endX, u16 startY, u16 endY, u8 absolute) {
         d = dy + (((absolute ? 0 : level_dx) + i) & 31);
         for (j = startY; j < endY; ++j, d+=32) {
             t = level[k+j];
-            if (t != 0xffff) {
-                if (t&0x8000) {
-                    t = anim_frames[animations[t&0xff].id][(t&0x300)>>8][animations[t&0xff].frame];
-                    if (t != 0xffff) {
-                        // flip?
-                        scrp1[d] = (flevel[k+j]^BLOCKS_FLIP1[t]) | (((u16)BLOCKS_PALIDX1[t])<<9) | (512-RESERVED+set_level[BLOCKS_IDX1[t]]);
-                        scrp2[d] = (flevel[k+j]^BLOCKS_FLIP2[t]) | (((u16)BLOCKS_PALIDX2[t])<<9) | (512-RESERVED+set_level[BLOCKS_IDX2[t]]);
-                    } else {
-                        scrp1[d] = 0;
-                        scrp2[d] = 0;
-                    }
-                } else {
-                    scrp1[d] = (flevel[k+j]^BLOCKS_FLIP1[t]) | (((u16)BLOCKS_PALIDX1[t])<<9) | (512-RESERVED+set_level[BLOCKS_IDX1[t]]);
-                    scrp2[d] = (flevel[k+j]^BLOCKS_FLIP2[t]) | (((u16)BLOCKS_PALIDX2[t])<<9) | (512-RESERVED+set_level[BLOCKS_IDX2[t]]);
-                }
-            } else {
-                scrp1[d] = 0;
-                scrp2[d] = 0;
-            }
+            if ((t != 0xffff) && (t & 0x8000))
+                t = ANIM_FRAME(t);
+			if (t != 0xffff) {
+				scrp1[d] = (flevel[k + j] ^ BLOCKS_FLIP1[t]) | (((u16)BLOCKS_PALIDX1[t]) << 9) | (512 - RESERVED + set_level[BLOCKS_IDX1[t]]);
+				scrp2[d] = (flevel[k + j] ^ BLOCKS_FLIP2[t]) | (((u16)BLOCKS_PALIDX2[t]) << 9) | (512 - RESERVED + set_level[BLOCKS_IDX2[t]]);
+			} else {
+				scrp1[d] = 0;
+				scrp2[d] = 0;
+			}
         }
-        k += LEVEL0_HEIGHT;
+        k += level_h;
     }
 }
 
 void clearTiles(u16 startX, u16 endX, u16 startY, u16 endY, u8 absolute) {
     u16 i, j, t;
-    u16 k = absolute ? (startX * LEVEL0_HEIGHT) : ((level_dx + startX) * LEVEL0_HEIGHT + level_dy);
+    u16 k = absolute ? (startX * level_h) : ((level_dx + startX) * level_h + level_dy);
     for (i = startX; i < endX; ++i) {
         for (j = startY; j < endY; ++j) {
             t = level[k+j];
             if (t != 0xffff) {
                 if (t&0x8000) {
-                    t = anim_frames[animations[t&0xff].id][(t&0x300)>>8][animations[t&0xff].frame];
+                    t = ANIM_FRAME(t);
                     if (t == 0xffff)
                         continue;
                 }
@@ -354,25 +391,25 @@ void clearTiles(u16 startX, u16 endX, u16 startY, u16 endY, u8 absolute) {
                 used_level[BLOCKS_IDX2[t]]--;
             }
         }
-        k += LEVEL0_HEIGHT;
+        k += level_h;
     }
 }
 
-void setLevelPos(u8 flag, u16 nt) {
+void setLevelPos(u8 flag, u16 nt, u16* new_tiles) {
     u16 i;
-    u16 li=level_dx+21>LEVEL0_WIDTH?20:21;
-    u16 lj=level_dy+20>LEVEL0_HEIGHT?19:20;
+    u16 li=level_dx+21>level_w?20:21;
+    u16 lj=level_dy+20>level_h?19:20;
 
     if (flag) {
         // Find new tiles
         if (flag&J_LEFT)
-            nt = addNewTiles(0, 1, 0, lj, nt, 0);
+            nt = addNewTiles(0, 1, 0, lj, nt, 0, new_tiles);
         else if ((flag&J_RIGHT) && li == 21)
-            nt = addNewTiles(20, 21, 0, lj, nt, 0);
+            nt = addNewTiles(20, 21, 0, lj, nt, 0, new_tiles);
         if (flag&J_UP)
-            nt = addNewTiles((flag&J_RIGHT) ? 1 : 0, (flag&J_LEFT) ? 20 : 21, 0, 1, nt, 0);
+            nt = addNewTiles((flag&J_RIGHT) ? 1 : 0, (flag&J_LEFT) ? 20 : 21, 0, 1, nt, 0, new_tiles);
         else if ((flag&J_DOWN) && lj == 20)
-            nt = addNewTiles((flag&J_RIGHT) ? 1 : 0, (flag&J_LEFT) ? 20 : 21, 19, 20, nt, 0);
+            nt = addNewTiles((flag&J_RIGHT) ? 1 : 0, (flag&J_LEFT) ? 20 : 21, 19, 20, nt, 0, new_tiles);
 
         // Remove tiles
         if (flag&J_LEFT)
@@ -426,14 +463,14 @@ u16 prepareSprite(ENTITY *e, u16 spr, u16* new_tiles, u16 nt) {
     u16 id = ((spr&0x3)<<1) + ((spr&0xffc)<<2);
     u16 i, b;
     if (e->vis) {
-        if (e->spr == id)
+        if (e->spr == id) // same sprite as previous display
             return nt;
         clearEntity(e);
     } else if (!e->active) {
         e->active = 1;
         e->dx = -ENEMY_SPEED[e->id];
     }
-    e->spr = id;
+    e->spr = (u8) id;
     e->vis = 1;
     for (i = 0; i < 4; ++i) {
         b = SPRITES_IDX1[id + spr_offset[i]];
@@ -466,7 +503,7 @@ u8 showSprite(ENTITY* e, u8 i, u8 x, u8 y) {
             SetSprite(i++,
                       x + spr_x_offset[f][j],
                       y + spr_y_offset[j],
-                      SPRITES_PALIDX2[id]+8,
+                      SPRITES_PALIDX2[id] + SPRITES_NPALS1,
                       set_sprites[SPRITES_IDX2[id]] + 1,
                       0,
                       TOP_PRIO,
@@ -488,55 +525,63 @@ void clearSprites(u8 i) {
     lastSpr = i;
 }
 
-#define ANIM_TILE(t) (((t!=0xffff) && (t&0x8000)) ? anim_frames[animations[t&0xff].id][(t&0x300)>>8][animations[t&0xff].frame] : t)
-
 u8 isFreeH(ENTITY *e, s16 dx) {
-    u16 t = ((e->x >> 3) + dx) * LEVEL0_HEIGHT + (e->y >> 3);
+    u16 t = ((e->x >> 3) + dx) * level_h + (e->y >> 3);
     u16 lt0 = ANIM_TILE(level[t]);
     u16 lt1 = ANIM_TILE(level[t+1]);
     u16 lt2 = ((e->y&0x7) == 0) ? 0xffff : ANIM_TILE(level[t+2]);
-    return ((lt0 == 0xffff || blocks_type[lt0] != 1)
-          &&(lt1 == 0xffff || blocks_type[lt1] != 1)
-          &&(lt2 == 0xffff || blocks_type[lt2] != 1));
+    return ( (lt0 == 0xffff || blocks_type[lt0] != SOLID)
+          && (lt1 == 0xffff || blocks_type[lt1] != SOLID)
+          && (lt2 == 0xffff || blocks_type[lt2] != SOLID));
 }
 
 u8 isFreeV(ENTITY *e, s16 dy) {
     u16 t = (e->y>>3)+dy, lt0, lt1, lt2;
-    if (t >= LEVEL0_HEIGHT)
+    if (t >= level_h)
         return 1;
-    t += (e->x>>3)*LEVEL0_HEIGHT;
+    t += (e->x>>3)*level_h;
     lt0 = ANIM_TILE(level[t]);
-    lt1 = ANIM_TILE(level[t+LEVEL0_HEIGHT]);
-    lt2 = ((e->x&0x7) == 0) ? 0xffff : ANIM_TILE(level[t+LEVEL0_HEIGHT+LEVEL0_HEIGHT]);
-    return ((lt0 == 0xffff || blocks_type[lt0] != 1)
-          &&(lt1 == 0xffff || blocks_type[lt1] != 1)
-          &&(lt2 == 0xffff || blocks_type[lt2] != 1));
+    lt1 = ANIM_TILE(level[t+level_h]);
+    lt2 = ((e->x&0x7) == 0) ? 0xffff : ANIM_TILE(level[t+level_h+level_h]);
+    return ( (lt0 == 0xffff || blocks_type[lt0] != SOLID)
+          && (lt1 == 0xffff || blocks_type[lt1] != SOLID)
+          && (lt2 == 0xffff || blocks_type[lt2] != SOLID));
 }
 
 u8 isLethal(ENTITY *e, u16 dx, u16 dy) {
     u16 t = ((e->y+dy)>>3), lt0;
-    if (t >= LEVEL0_HEIGHT) {
+    if (t >= level_h) {
         return 0;
     }
-    t += ((e->x+dx)>>3)*LEVEL0_HEIGHT;
+    t += ((e->x+dx)>>3)*level_h;
     lt0 = ANIM_TILE(level[t]);
-    return lt0 != 0xffff && blocks_type[lt0] == 2;
+    return lt0 != 0xffff && blocks_type[lt0] == LETHAL;
+}
+
+u8 isSwimming() {
+	u16 t = ((player.y + 8) >> 3), lt0;
+	if (t >= level_h) {
+		return 0;
+	}
+	t += ((player.x + 8) >> 3)*level_h;
+	lt0 = ANIM_TILE(level[t]);
+	return lt0 != 0xffff && blocks_type[lt0] == WATER;
 }
 
 void displaySprites() {
     u8 i, j, x0, y0;
     u16 new_tiles[512-RESERVED-1];
-    u16 nt;
+    u16 nt, spr;
     s16 scr_y = SCR1_Y;
 
     // Sprites
     if (player.dead != 1) {
         if (player.dead) {
-            nt = PLAYER_DEAD[player.id][((player.dead--)>>2)&0x7];
+			spr = PLAYER_DEAD[player.id][((player.dead--)>>2)&0x7];
         } else {
-            nt = player.dx == 0 ? 4 : ((player.x>>2)&3);
+			spr = player.dx == 0 ? 4 : ((player.x>>2)&3);
         }
-        nt = prepareSprite(&player, nt, new_tiles, 0);
+        nt = prepareSprite(&player, spr, new_tiles, 0);
     } else {
         nt = 0;
     }
@@ -550,15 +595,15 @@ void displaySprites() {
             }
         }
         if (((player.x <= 72 && enemies[i].x < 160)
-          || (player.x > ((LEVEL0_WIDTH<<3) - 88) && enemies[i].x > (LEVEL0_WIDTH<<3) - 176)
+          || (player.x > ((level_w<<3) - 88) && enemies[i].x > (level_w<<3) - 176)
           || (player.x >= enemies[i].x && player.x - enemies[i].x < 88)
           || (enemies[i].x >= player.x && enemies[i].x - player.x < 88))
         &&  ((enemies[i].y < scr_y + 152) && (enemies[i].y > scr_y - 168))) {
             // visible
-            j = enemies[i].dead
+            spr = enemies[i].dead
                 ? ENEMY_DEAD[enemies[i].id][((enemies[i].dead--)>>2)&0x7]
                 : ENEMY_ANIM[enemies[i].id][((enemies[i].anim++)>>2)&0x3];
-            nt = prepareSprite(&enemies[i], j, new_tiles, nt);
+            nt = prepareSprite(&enemies[i], spr, new_tiles, nt);
         } else if (enemies[i].vis) {
             clearEntity(&enemies[i]);
         }
@@ -567,10 +612,10 @@ void displaySprites() {
     loadTileRam(set_sprites, 1, (u16*)SPRITES_TILES, (u16*)SPRITES_PRIORITY, SPRITES_TILES_COUNT-1, used_sprites, new_tiles, nt);
 
     x0 = (u8) (player.x<=72 ? player.x
-                            : (player.x>((LEVEL0_WIDTH<<3) - 88) ? 160 - ((LEVEL0_WIDTH<<3) - player.x)
+                            : (player.x>((level_w<<3) - 88) ? 160 - ((level_w<<3) - player.x)
                                                                  : 72));
     y0 = (u8) (player.y<=68 ? player.y
-                            : (player.y>((LEVEL0_HEIGHT<<3) - 84) ? 152 - ((LEVEL0_HEIGHT<<3) - player.y)
+                            : (player.y>((level_h<<3) - 84) ? 152 - ((level_h<<3) - player.y)
                                                                   : 68));
     i = player.dead != 1 ? showSprite(&player, 0, x0, (u8) (y0 - followDY)) : 0;
 
@@ -619,7 +664,7 @@ void moveEnemies() {
                     enemies[i].dx = -enemies[i].dx;
                 }
             } else if (enemies[i].dx > 0) {
-                if (enemies[i].x < (LEVEL0_WIDTH<<3)-16 && isFreeH(&enemies[i], 2)) {
+                if (enemies[i].x < (level_w<<3)-16 && isFreeH(&enemies[i], 2)) {
                     enemies[i].x += enemies[i].dx;
                 } else {
                     enemies[i].dx = -enemies[i].dx;
@@ -628,7 +673,7 @@ void moveEnemies() {
         } else {
             if ((enemies[i].y&0xf) != 0) {
                 enemies[i].y += enemies[i].dy;
-            } else if (enemies[i].y >= (LEVEL0_HEIGHT<<3)) {
+            } else if (enemies[i].y >= (level_h<<3)) {
                 enemies[i].dead = 1;
             } else if (isFreeV(&enemies[i], 2)) {
                 enemies[i].y += enemies[i].dy;
@@ -641,7 +686,6 @@ void moveEnemies() {
 
 u8 movePlayer() {
     u8 upd = 0;
-    //s16 startX = player.x & 0xfff8;
     s16 i;
 
     if (player.dy < 0) {
@@ -649,7 +693,7 @@ u8 movePlayer() {
             if ((player.y&0x7) == 0) {
                 if (player.y > 0 && isFreeV(&player, -1)) {
                     --player.y;
-                    if (player.y > 68 && player.y < ((LEVEL0_HEIGHT<<3) - 84)) {
+                    if (player.y > 68 && player.y < ((level_h<<3) - 84)) {
                         level_dy--;
                         upd |= J_UP;
                     }
@@ -666,7 +710,7 @@ u8 movePlayer() {
         for (i = 0; i < player.dy; ++i) {
             if ((player.y&0x7) == 0) {
                 if (isFreeV(&player, 2)) {
-                    if (++player.y >= (LEVEL0_HEIGHT<<3)) {
+                    if (++player.y >= (level_h<<3)) {
                         player.dead = 1;
                         break;
                     }
@@ -675,12 +719,12 @@ u8 movePlayer() {
                     break;
                 }
             } else {
-                if (++player.y >= (LEVEL0_HEIGHT<<3)) {
+                if (++player.y >= (level_h<<3)) {
                     player.dead = 1;
                     break;
                 }
                 if ((player.y&0x7) == 0) {
-                    if (player.y > 68 && player.y < ((LEVEL0_HEIGHT<<3) - 84)) {
+                    if (player.y > 68 && player.y < ((level_h<<3) - 84)) {
                         level_dy++;
                         upd |= J_DOWN;
                     }
@@ -698,7 +742,7 @@ u8 movePlayer() {
             if ((player.x&0x7) == 0) {
                 if (player.x > 0 && isFreeH(&player,-1)) {
                     --player.x;
-                    if (player.x > 72 && player.x < ((LEVEL0_WIDTH<<3) - 88)) {
+                    if (player.x > 72 && player.x < ((level_w<<3) - 88)) {
                         level_dx--;
                         upd |= J_LEFT;
                     }
@@ -716,7 +760,7 @@ u8 movePlayer() {
     } else if (player.dx > 0) {
         for (i = 0; i < player.dx; ++i) {
             if ((player.x&0x7) == 0) {
-                if (player.x < (LEVEL0_WIDTH<<3)-16 && isFreeH(&player,2)) {
+                if (player.x < (level_w<<3)-16 && isFreeH(&player,2)) {
                     ++player.x;
                 } else {
                     break;
@@ -724,7 +768,7 @@ u8 movePlayer() {
             } else {
                 ++player.x;
                 if ((player.x&0x7) == 0) {
-                    if (player.x > 72 && player.x < ((LEVEL0_WIDTH<<3) - 88)) {
+                    if (player.x > 72 && player.x < ((level_w<<3) - 88)) {
                         level_dx++;
                         upd |= J_RIGHT;
                     }
@@ -736,17 +780,20 @@ u8 movePlayer() {
             }
         }
     }
-    if (isLethal(&player, 4, 4)
-     || isLethal(&player, 12, 4)
-     || isLethal(&player, 4, 12)
-     || isLethal(&player, 12, 12)) {
+	if (air == 0) {
+		player.dead = 31;
+		player.id = DROWNED;
+	} else if (isLethal(&player, 4, 4)
+			 || isLethal(&player, 12, 4)
+			 || isLethal(&player, 4, 12)
+			 || isLethal(&player, 12, 12)) {
         player.dead = 31;
         player.id = IMPALED;
-    }
+	}
     return upd;
 }
 
-u16 animUpdate() {
+u16 animUpdate(u16 * new_tiles) {
     u16 i, nt = 0;
     for (i = 0; i < aclevel; ++i) {
         if (animations[i].active == 1) {
@@ -758,7 +805,7 @@ u16 animUpdate() {
                     animations[i].frame += 1;
                     nt = addNewTiles(animations[i].x0, animations[i].x0 + 2,
                                      animations[i].y0, animations[i].y0 + 2,
-                                     nt, 1);
+                                     nt, 1, new_tiles);
                     animations[i].change = 1;
                     animations[i].counter = ANIMATION_COUNTER;
                 } else {
@@ -804,35 +851,42 @@ u16 animUpdate() {
 
 void gameLoop() {
     u8 i, j, joy = JOYPAD;
+	u16 new_tiles[RESERVED];
 
     if (player.dead == 0) {
+		i = isSwimming();
         if (joy & J_RIGHT) {
-            player.dx = (joy & J_DOWN) ? 1 : 2;
+            player.dx = i || (joy & J_DOWN) ? 1 : 2;
         }
         else if (joy & J_LEFT) {
-            player.dx = (joy & J_DOWN) ? -1 : -2;
+            player.dx = i || (joy & J_DOWN) ? -1 : -2;
         } else {
             player.dx = 0;
         }
-        if (joy & J_UP) {
+        if (joy & (J_UP|J_A)) {
             if (player.dy == 0 && !isFreeV(&player, 2)) {
-                player.dy = -21;
+                player.dy = i ? -17 : -21;
+				SL_PlaySFX(1);
             }
         }
+		if (i)
+			air -= 1;
+		else if (air < MAX_AIR)
+			air += 1;
     } else {
         player.dx = 0;
         player.dy = 0;
     }
 
-    setLevelPos(player.dead == 0 ? movePlayer() : 0, animUpdate());
+    setLevelPos(player.dead == 0 ? movePlayer() : 0, animUpdate(new_tiles), new_tiles);
     moveEnemies();
 
     // Scroll x pos
-    i = player.x <= 72 ? 0 : ((player.x >= ((LEVEL0_WIDTH<<3) - 88) ? ((LEVEL0_WIDTH<<3) - 160) : (player.x - 72)) & 0xff);
+    i = player.x <= 72 ? 0 : ((player.x >= ((level_w<<3) - 88) ? ((level_w<<3) - 160) : (player.x - 72)) & 0xff);
     SCR1_X = i;
     SCR2_X = i;
     // Scroll y pos
-    i = player.y <= 68 ? 0 : ((player.y >= ((LEVEL0_HEIGHT<<3) - 84) ? ((LEVEL0_HEIGHT<<3) - 152) : (player.y - 68)) & 0xff);
+    i = player.y <= 68 ? 0 : ((player.y >= ((level_h<<3) - 84) ? ((level_h<<3) - 152) : (player.y - 68)) & 0xff);
     j = SCR1_Y;
     if (j < i) {
         if (followDir != 1 || followCount == 0) {
@@ -878,31 +932,27 @@ void addEnemy(u8 id, u16 x, u16 y) {
 }
 
 void loadLevel(u8 lvl) {
-    u16*  levels[LEVEL_COUNT] = { (u16*)LEVEL0 };
-    u16* flevels[LEVEL_COUNT] = { (u16*)LEVEL0_FLIP };
-    ANIMATED_TILE* alevels[LEVEL_COUNT] = { (ANIMATED_TILE*)LEVEL0_ANIMS };
-    u16 aclevels[LEVEL_COUNT] = { LEVEL0_ANIM_COUNT };
-    SPRITE_POS* slevels[LEVEL_COUNT] = { (SPRITE_POS*)LEVEL0_SPRITES };
-    u16 sprcount[LEVEL_COUNT] = { LEVEL0_SPRITE_COUNT };
-    u16* plevels[LEVEL_COUNT] = { (u16*)LEVEL0_PRIORITY };
-    u16  ulevels[LEVEL_COUNT] = { LEVEL0_USED };
-    u16 i, j, k, t;
-    
+    u16 i, j, k, t, nt = 0, b;
+	u8 x, y;
+	u16 new_tiles[RESERVED];
+
     level_dx = 0;
     level_dy = 0;
-    level = levels[lvl];
-    flevel = flevels[lvl];
-    plevel = plevels[lvl];
-    level_used = ulevels[lvl];
+	level_w = LEVELS[lvl].width;
+	level_h = LEVELS[lvl].height;
+	level = LEVELS[lvl].tiles;
+	flevel = LEVELS[lvl].flip;
+	plevel = LEVELS[lvl].priority;
+    level_used = LEVELS[lvl].used;
 
-    aclevel = aclevels[lvl];
+    aclevel = LEVELS[lvl].animCount;
     for (i = 0; i < aclevel; ++i) {
-        animations[i].id     = alevels[lvl][i].id;
-        animations[i].x0     = alevels[lvl][i].x;
-        animations[i].y0     = alevels[lvl][i].y;
+        animations[i].id     = LEVELS[lvl].animated[i].id;
+        animations[i].x0     = LEVELS[lvl].animated[i].x;
+        animations[i].y0     = LEVELS[lvl].animated[i].y;
         animations[i].x      = animations[i].x0 << 3;
         animations[i].y      = animations[i].y0 << 3;
-        animations[i].flip   = alevels[lvl][i].flip;
+        animations[i].flip   = LEVELS[lvl].animated[i].flip;
         animations[i].active = 0;
         animations[i].frame  = 0;
         animations[i].change = 0;
@@ -914,19 +964,23 @@ void loadLevel(u8 lvl) {
     memset(used_sprites, 0, sizeof(used_sprites));
 
     // check used tiles
-    k = level_dx * LEVEL0_HEIGHT + level_dy;
+    k = level_dx * level_h + level_dy;
     for (i = 0; i < 21; ++i) {
         for (j = 0; j < 20; ++j) {
             t = level[k+j];
-            if (t != 0xffff) {
-                used_level[BLOCKS_IDX1[t]]++;
-                used_level[BLOCKS_IDX2[t]]++;
-            }
+            if ((t & 0xfc00) != 0xfc00) { // anim or empty
+				b = BLOCKS_IDX1[t];
+				if (++used_level[b] == 1)
+					new_tiles[nt++] = b;
+				b = BLOCKS_IDX2[t];
+				if (++used_level[b] == 1)
+					new_tiles[nt++] = b;
+			}
         }
-        k += LEVEL0_HEIGHT;
+        k += level_h;
     }
     // load and fill screen
-    loadTileRam(set_level, 512-RESERVED, (u16*)BLOCKS_TILES, plevel, level_used, used_level, new_tiles, 0);
+    loadTileRam(set_level, 512-RESERVED, (u16*)BLOCKS_TILES, plevel, level_used, used_level, new_tiles, nt);
     fillPlanes(0, 21, 0, 20, 0);
 
     // find start
@@ -936,28 +990,60 @@ void loadLevel(u8 lvl) {
     player.dx = 0;
     player.dy = 0;
     player.vis = 0;
-    player.active = 1;
+	air = MAX_AIR;
+	player.active = 1;
+	time = 
 
     // enemies
     enemy_count = 0;
-    for (i = 0; i < sprcount[lvl]; ++i) {
-        if (slevels[lvl][i].id == 0) {
-            player.y = slevels[lvl][i].y << 3;
+    for (i = 0; i < LEVELS[lvl].sprCount; ++i) {
+        if (LEVELS[lvl].sprites[i].id == 0) {
+            player.y = LEVELS[lvl].sprites[i].y << 3;
         } else {
-            addEnemy(slevels[lvl][i].id - 1,
-                     slevels[lvl][i].x << 3,
-                     slevels[lvl][i].y << 3);
+            addEnemy(
+				LEVELS[lvl].sprites[i].id - 1,
+				LEVELS[lvl].sprites[i].x << 3,
+				LEVELS[lvl].sprites[i].y << 3);
         }
     }
     
     // Scroll x pos
-    i = player.x <= 72 ? 0 : ((player.x >= ((LEVEL0_WIDTH<<3) - 88) ? ((LEVEL0_WIDTH<<3) - 160) : (player.x - 72)) & 0xff);
-    SCR1_X = i;
-    SCR2_X = i;
+    x = player.x <= 72 ? 0 : ((player.x >= ((level_w<<3) - 88) ? ((level_w<<3) - 160) : (player.x - 72)) & 0xff);
+    SCR1_X = x;
+    SCR2_X = x;
     // Scroll y position
-    i = player.y <= 68 ? 0 : ((player.y >= ((LEVEL0_HEIGHT<<3) - 84) ? ((LEVEL0_HEIGHT<<3) - 152) : (player.y - 68)) & 0xff);
-    SCR1_Y = i;
-    SCR2_Y = i;
+    y = player.y <= 68 ? 0 : ((player.y >= ((level_h<<3) - 84) ? ((level_h<<3) - 152) : (player.y - 68)) & 0xff);
+    SCR1_Y = y;
+    SCR2_Y = y;
+}
+
+extern u8 psg_mode;
+
+void waitVBL()
+{
+	VBCounter = 0;
+	if (psg_mode) {
+#ifdef WIN32
+		checkInput();
+		(*VBL_INT)();
+		flipScreen();
+		z80MemWriteB(0x0d, 1);
+		while (z80MemReadB(0x0d)) {
+			z80Step();
+		}
+#else
+		*(0x700d) = 1;
+		while (!VBCounter && *(0x700d))
+			__ASM("  NOP");
+#endif
+	}
+}
+
+volatile u8 Z80Counter = 0;
+
+void __interrupt myZ80Int()
+{
+	Z80Counter++;
 }
 
 int main(
@@ -966,20 +1052,35 @@ int argc, char*argv[]
 #endif
 )
 {
-    InitNGPC();
+	InitNGPC();
     ClearAll();
     SetBackgroundColour(RGB(0, 0, 0));
 
-    SL_SoundInit();
+	DISABLE_INTERRUPTS;
+	VBL_INT = myVBL;
+	Z80_INT = myZ80Int;
+	ENABLE_INTERRUPTS;
 
-    SL_LoadGroup(magical0,sizeof(magical0));
+    SL_SoundInit(1);
+	SL_LoadGroup(GNG13_PSG, GNG13_PSG_SIZE);
+//	SL_LoadGroup(magical0,sizeof(magical0));
     SL_PlayTune(0);
 
-    DISABLE_INTERRUPTS;
-    VBL_INT = myVBL;
-    ENABLE_INTERRUPTS;
+	showImage((SOD_IMG*)&LOGO_IMG, CENTER, CENTER, NULL, 1, NULL, 0);
+	while (!done)
+	{
+		u8 joy = JOYPAD;
+		if (joy & (J_A | J_B))
+			break;
+		waitVBL();
+	}
+	SL_PlaySFX(0);
+	while (JOYPAD)
+		waitVBL();
+	ClearAll();
 
-    while (1) {
+    while (!done)
+	{
         loadLevel(0);
 
         lastSpr = 64;
@@ -988,13 +1089,12 @@ int argc, char*argv[]
         followCount = 0;
         followDir = 0;
         
-        while (player.dead != 1)
+		while (player.dead != 1 && !done)
         {
             gameLoop();
-            Sleep(1);
+			waitVBL();
         }
         ClearPals();
     }
-
     return 0;
 }

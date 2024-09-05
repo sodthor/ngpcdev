@@ -2,11 +2,11 @@
 #include "library.h"
 
 #ifdef WIN32
-void exit(int);
 #include "win32.h"
 #endif
 
-volatile u8 VBCounter;
+
+volatile u8 VBCounter = 0;
 
 // dummy Interrupt function used for interrupt that are currently
 // unused. To add an interrupt simply supply your own routine in the
@@ -91,6 +91,7 @@ void InitNGPC(void)
 //////////////////////////////////////////////////////////////////////////////
 // SysShutdown                                                              //
 //////////////////////////////////////////////////////////////////////////////
+#ifndef NOSYS
 void SysShutdown()
 {
 #ifndef WIN32
@@ -107,15 +108,15 @@ void SysShutdown()
 #else
    __asm(" call (xix)");
 #endif
-#else
-	exit(0);
 #endif
 }
+#endif
 
 
 //////////////////////////////////////////////////////////////////////////////
 // SysSetSystemFont                                                         //
 //////////////////////////////////////////////////////////////////////////////
+#ifndef NOSYS
 void SysSetSystemFont()
 {
 #ifndef WIN32
@@ -131,6 +132,7 @@ void SysSetSystemFont()
    __asm(" call xix");
 #endif
 }
+#endif
 
 //////////////////////////////////////////////////////////////////////////////
 // ClearScreen
@@ -448,7 +450,9 @@ void SetSpritePosition(u8 SpriteNo, u8 XPos, u8 YPos)
    *(theSprite+3) = YPos;
 }
 
+#ifndef RAND_MAX
 #define RAND_MAX 32767
+#endif
 volatile u32 RAND_RandomData;
 
 //////////////////////////////////////////////////////////////////////////////

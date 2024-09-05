@@ -94,6 +94,9 @@ typedef void (*FuncPtr)(void);
 #define DMA2_INT			(*(Interrupt**)0x6FF8)
 #define DMA3_INT			(*(Interrupt**)0x6FFC)
 
+#define Z80_NMI (*((u8*)0xba))
+#define Z80_COM (*((u8*)0xbc))
+
 #else
 
 extern u8 MEM_6f83;
@@ -181,6 +184,9 @@ Interrupt* DMA0_INT;
 Interrupt* DMA1_INT;
 Interrupt* DMA2_INT;
 Interrupt* DMA3_INT;
+
+extern u8 Z80_NMI;
+extern u8 Z80_COM;
 
 #endif
 

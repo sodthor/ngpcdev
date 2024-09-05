@@ -1,5 +1,7 @@
-#ifndef _MPLAYER_H_
-#define _MPLAYER_H_
+#ifndef _MPLAYER_H
+#define _MPLAYER_H
+
+#include "types.h"
 
 typedef struct
 {
