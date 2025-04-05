@@ -65,12 +65,12 @@ typedef enum {
     PSGStop
 } PSG_COMMAND;
 
-void SL_LoadData(const u8 *data, u16 len, u16 dest)
+void SL_LoadData(const u8 *data, u16 len)
 {
     u8 *ram = Z80_RAM;
-    u16 i, delta = (dest == 0 ? PSGLIB_SIZE : dest);
-    for (i = 0; i < len && i + delta < 4096; ++i)
-        ram[i + delta] = data[i];
+    u16 i;
+    for (i = 0; i < len && i + PSGLIB_SIZE < 4096; ++i)
+        ram[i + PSGLIB_SIZE] = data[i];
 }
 
 void SL_StopBGM(u8 sync)
@@ -79,9 +79,8 @@ void SL_StopBGM(u8 sync)
     SL_WaitZ80();
 }
 
-void SL_PlayBGM(u16 index, u8 noRepeat)
+void SL_PlayBGM(u8 noRepeat)
 {
-    *((u16*)0x7006) = (index < PSGLIB_SIZE || index > 4096) ? PSGLIB_SIZE : index;
     Z80_COMM = (noRepeat ? PSGPlayNoRepeat : PSGPlay) ^ 0xff;
     SL_WaitZ80();
 }

@@ -48,8 +48,8 @@ void playBGM(int cur)
 {
 	int j;
 	SL_StopBGM();
-	SL_LoadData(list[cur].data, list[cur].len, 0);
-	SL_PlayBGM(0, 0);
+	SL_LoadData(list[cur].data, list[cur].len);
+	SL_PlayBGM(0);
 	PrintDecimal(SCR_1_PLANE, 0, 13, 12, cur, 2);
 	while ((j=JOYPAD)&(J_A|J_B))
 		waitVBL();
