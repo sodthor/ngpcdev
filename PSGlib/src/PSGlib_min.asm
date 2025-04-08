@@ -35,15 +35,13 @@ PSGLoopFlag       EQU 00004h   ; the tune should loop or not (flag)
 ; c : substring length
 
 _start_z80:
-  di               ; 1 byte
-  ld sp, 01000h    ; 3 bytes
-
-; ************************************************************************************
-; initializes the PSG 'engine'
+  di
+  ld sp,_music_start_
 ;PSGInit:
-  xor a             ; ld a,PSG_STOPPED ; 1 byte
-  ld d,a            ; PSGMusicStatus in d: set music status to PSG_STOPPED; 1 byte = 6 bytes ok for data above
-  ; code above will be cleared by data values (PSGMusicPointer...)
+  xor a             ; ld a,PSG_STOPPED
+  ld d,a            ; PSGMusicStatus in d: set music status to PSG_STOPPED
+ 
+  ; code above (5 bytes) will be cleared by data values (PSGMusicPointer...)
 
 _mainLoop:
   ld hl, 08000h
@@ -75,7 +73,8 @@ _runCommand: ; a is 2 (loop) or 1 (no loop)
 ;PSGPlay:
   ld (PSGLoopFlag),a
   ld hl,_music_start_
-  push hl                         ;ld (PSGMusicPointer),hl         ; set music pointer to begin of music
+  ld sp, hl
+  push hl                         ; ld (PSGMusicPointer),hl         ; set music pointer to begin of music
   ld (PSGMusicLoopPoint),hl       ; loop pointer points to begin too
   xor a
   ld e,a                          ; PSGMusicSkipFrames in e: reset the skip frames
@@ -178,6 +177,9 @@ _substring:
   ld c,a                              ; ld (PSGMusicSubstringLen),a         ; save len
   jr _intLoop
 
+; stack: music pointer + ret PSGStop x 2
+  dw 0, 0, 0
+  
 _music_start_:
 
   END
