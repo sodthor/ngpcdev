@@ -28,11 +28,13 @@ PSGLoop        EQU 001h
 
 PSGMusicLoopPoint EQU 00000h   ; the pointer to the loop begin
 PSGMusicSubstringRetAddr EQU 00002h   ; return to this address when substring is over
-PSGLoopFlag       EQU 00004h   ; the tune should loop or not (flag)
+
 ; in registers:
 ; d : PSG_STOPPED/PSG_PLAYING
 ; e : frames to skip
-; c : substring length
+; c': substring length
+; d': loop flag
+;hl': music ptr
 
 _start_z80:
   di
@@ -41,7 +43,7 @@ _start_z80:
   xor a             ; ld a,PSG_STOPPED
   ld d,a            ; PSGMusicStatus in d: set music status to PSG_STOPPED
  
-  ; code above (5 bytes) will be cleared by data values (PSGMusicPointer...)
+  ; code above will be cleared (4 bytes) by data values (PSGMusicLoopPoint...)
 
 _mainLoop:
   ld hl, 08000h
@@ -71,40 +73,26 @@ _runCommand: ; a is 2 (loop) or 1 (no loop)
   jr z,_endLoop
   dec a
 ;PSGPlay:
-  ld (PSGLoopFlag),a
-  ld hl,_music_start_
-  ld sp, hl
-  push hl                         ; ld (PSGMusicPointer),hl         ; set music pointer to begin of music
+  exx
+  ld d,a                           ; loop flag in d'
+  ld hl,_music_start_             ; music ptr in hl'
   ld (PSGMusicLoopPoint),hl       ; loop pointer points to begin too
   xor a
+  ld c,a                          ; reset the substring len (for compression)
+  exx
   ld e,a                          ; PSGMusicSkipFrames in e: reset the skip frames
-  ld c,a                          ; ld (PSGMusicSubstringLen),a     ; reset the substring len (for compression)
   ld d,PSG_PLAYING                ; PSGMusicStatus in d: set status to PSG_PLAYING
   jr _mainLoop ; a = 0
 
-PSGStop:
-  ld hl,04000h
-  call PSGStop_
-  inc l ; hl = 04001h
-  ld d,PSG_STOPPED                               ; set status to PSG_STOPPED
-PSGStop_:
-  ld (hl),PSGLatch|PSGChannel0|PSGVolumeData|00Fh   ; latch channel 0, volume=0xF (silent)
-  ld (hl),PSGLatch|PSGChannel1|PSGVolumeData|00Fh   ; latch channel 1, volume=0xF (silent)
-  ld (hl),PSGLatch|PSGChannel2|PSGVolumeData|00Fh   ; latch channel 2, volume=0xF (silent)
-  ld (hl),PSGLatch|PSGChannel3|PSGVolumeData|00Fh   ; latch channel 3, volume=0xF (silent)
-  ret
-
 _noFrameSkip:
-  pop hl                         ; ld hl,(PSGMusicPointer)        ; read current address
-
+  exx
 _intLoop:
   ld b,(hl)                      ; load PSG byte (in B)
   inc hl                         ; point to next byte
   ld a,c                         ; ld a,(PSGMusicSubstringLen)    ; read substring len
   or a
   jr z,_continue                 ; check if it is 0 (we are not in a substring)
-  dec a                          ; decrease len
-  ld c,a                         ; ld (PSGMusicSubstringLen),a    ; save len
+  dec c                          ; decrease len
   jr nz,_continue
   ld hl,(PSGMusicSubstringRetAddr)  ; substring is over, retrieve return address
 
@@ -139,20 +127,12 @@ _noLatch:
   jr z,_done                     ; no additional frames
   jr c,_otherCommands            ; other commands?
   and 007h                       ; take only the last 3 bits for skip frames
+  exx
   ld e,a                         ; we got additional frames
-_done:
-  push hl                       ; ld (PSGMusicPointer),hl        ; save current address
   jr _endLoop                    ; frame done
-
-_musicLoop:
-  ld a,(PSGLoopFlag)               ; looping requested?
-  or a
-  jr nz,_doLoop                     ; No:stop it! (tail call optimization)
-  call PSGStop
-  jr _endLoop
-_doLoop:
-  ld hl,(PSGMusicLoopPoint)
-  jr _intLoop
+_done:
+  exx
+  jr _endLoop                    ; frame done
 
 _otherCommands:
   cp PSGSubString
@@ -177,8 +157,31 @@ _substring:
   ld c,a                              ; ld (PSGMusicSubstringLen),a         ; save len
   jr _intLoop
 
+_musicLoop:
+  ld a,d               ; looping requested?
+  or a
+  jr nz,_doLoop                     ; No:stop it! (tail call optimization)
+  ;exx
+  call PSGStop
+  jr _endLoop
+_doLoop:
+  ld hl,(PSGMusicLoopPoint)
+  jr _intLoop
+
+PSGStop:
+  ld hl,04000h
+  call PSGStop_
+  inc l ; hl = 04001h
+  ld d,PSG_STOPPED                               ; set status to PSG_STOPPED
+PSGStop_:
+  ld (hl),PSGLatch|PSGChannel0|PSGVolumeData|00Fh   ; latch channel 0, volume=0xF (silent)
+  ld (hl),PSGLatch|PSGChannel1|PSGVolumeData|00Fh   ; latch channel 1, volume=0xF (silent)
+  ld (hl),PSGLatch|PSGChannel2|PSGVolumeData|00Fh   ; latch channel 2, volume=0xF (silent)
+  ld (hl),PSGLatch|PSGChannel3|PSGVolumeData|00Fh   ; latch channel 3, volume=0xF (silent)
+  ret
+
 ; stack: music pointer + ret PSGStop x 2
-  dw 0, 0, 0
+  dw 0, 0
   
 _music_start_:
 
