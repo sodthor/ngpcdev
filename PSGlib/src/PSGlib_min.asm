@@ -3,10 +3,6 @@
 ;          https://github.com/sverx/PSGlib
 ;================================================================
 
-; NOTE: this uses a WLA-DX 'ramsection' at slot 3
-;       If you want to change or remove that,
-;       see the note at the end of this file
-
     cpu    z80
     org    0h
 
@@ -26,24 +22,23 @@ PSGWait        EQU 038h
 PSGSubString   EQU 008h
 PSGLoop        EQU 001h
 
-PSGMusicLoopPoint EQU 00000h   ; the pointer to the loop begin
-PSGMusicSubstringRetAddr EQU 00002h   ; return to this address when substring is over
-
 ; in registers:
 ; d : PSG_STOPPED/PSG_PLAYING
 ; e : frames to skip
 ; c': substring length
 ; d': loop flag
 ;hl': music ptr
+; ix: PSGMusicLoopPoint
+; iy: PSGMusicSubstringRetAddr
 
 _start_z80:
   di
-  ld sp,_music_start_
-;PSGInit:
+  ld sp,_mainLoop
+		 
   xor a             ; ld a,PSG_STOPPED
   ld d,a            ; PSGMusicStatus in d: set music status to PSG_STOPPED
- 
-  ; code above will be cleared (4 bytes) by data values (PSGMusicLoopPoint...)
+  ; stack: max 4 bytes : ret PSGStop x 2
+																			  
 
 _mainLoop:
   ld hl, 08000h
@@ -74,9 +69,10 @@ _runCommand: ; a is 2 (loop) or 1 (no loop)
   dec a
 ;PSGPlay:
   exx
-  ld d,a                           ; loop flag in d'
+  ld d,a                          ; loop flag in d'
   ld hl,_music_start_             ; music ptr in hl'
-  ld (PSGMusicLoopPoint),hl       ; loop pointer points to begin too
+  push hl
+  pop ix  ;ld (PSGMusicLoopPoint),hl       ; loop pointer points to begin too
   xor a
   ld c,a                          ; reset the substring len (for compression)
   exx
@@ -94,7 +90,8 @@ _intLoop:
   jr z,_continue                 ; check if it is 0 (we are not in a substring)
   dec c                          ; decrease len
   jr nz,_continue
-  ld hl,(PSGMusicSubstringRetAddr)  ; substring is over, retrieve return address
+  push iy
+  pop hl  ;ld hl,(PSGMusicSubstringRetAddr)  ; substring is over, retrieve return address
 
 _continue:
   ld a,b                         ; copy PSG byte into A
@@ -130,10 +127,6 @@ _noLatch:
   exx
   ld e,a                         ; we got additional frames
   jr _endLoop                    ; frame done
-_done:
-  exx
-  jr _endLoop                    ; frame done
-
 _otherCommands:
   cp PSGSubString
   jr nc,_substring
@@ -142,7 +135,8 @@ _otherCommands:
 ;  cp PSGLoop
 ;  ret nz                         ; 'ret' should never happen! if we do, it means the PSG file is probably corrupted, so we just RET
 ;_setLoopPoint:
-  ld (PSGMusicLoopPoint),hl
+  push hl
+  pop ix  ; ld (PSGMusicLoopPoint),hl
   jr _intLoop
 
 _substring:
@@ -150,7 +144,8 @@ _substring:
   inc hl
   ld b,(hl)
   inc hl
-  ld (PSGMusicSubstringRetAddr),hl    ; save return address
+  push hl
+  pop iy  ;ld (PSGMusicSubstringRetAddr),hl    ; save return address
   ld hl,_music_start_
   add hl,bc                           ; make substring current
   sub PSGSubString-4                  ; len is value - $08 + 4
@@ -161,11 +156,13 @@ _musicLoop:
   ld a,d               ; looping requested?
   or a
   jr nz,_doLoop                     ; No:stop it! (tail call optimization)
-  ;exx
   call PSGStop
-  jr _endLoop
+_done:
+  exx
+  jr _endLoop                    ; frame done
 _doLoop:
-  ld hl,(PSGMusicLoopPoint)
+  push ix
+  pop hl  ;ld hl,(PSGMusicLoopPoint)
   jr _intLoop
 
 PSGStop:
@@ -179,9 +176,6 @@ PSGStop_:
   ld (hl),PSGLatch|PSGChannel2|PSGVolumeData|00Fh   ; latch channel 2, volume=0xF (silent)
   ld (hl),PSGLatch|PSGChannel3|PSGVolumeData|00Fh   ; latch channel 3, volume=0xF (silent)
   ret
-
-; stack: music pointer + ret PSGStop x 2
-  dw 0, 0
   
 _music_start_:
 
