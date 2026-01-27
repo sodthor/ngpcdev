@@ -109,10 +109,8 @@ _send2PSG_4001h:
   jr _intLoop
 
 _noVolume:
-  and PSGChannel3
-  xor PSGChannel3
-  ld a,b
-  jr nz,_send2PSG_4001h           ; send data to PSG if it is for channels 0-1 or 2
+  cp 0E0h
+  jr c,_send2PSG_4001h           ; send data to PSG if it is for channels 0-1 or 2
   ld (04000h),a                       ; output the byte in noise register
   jr _intLoop
 
