@@ -33,65 +33,80 @@ PSGLoop        EQU 001h
 
 _start_z80:
   di
-  ld sp,_mainLoop
+  ld sp, PSGStop
 		 
-  xor a             ; ld a,PSG_STOPPED
-  ld d,a            ; PSGMusicStatus in d: set music status to PSG_STOPPED
-  ; stack: max 4 bytes : ret PSGStop x 2
-																			  
+  ld d,PSG_STOPPED            ; PSGMusicStatus in d: set music status to PSG_STOPPED
+	jr _mainLoop
+
+; stack: max 4 bytes : ret PSGStop x 2
+
+PSGStop: ; called by rst 08h
+  ld hl,04000h
+  rst 10h ; call PSGStop_
+  inc l ; hl = 04001h
+  ld d,PSG_STOPPED                                  ; set status to PSG_STOPPED
+  nop                                               ; filler to align with PSGStop_
+PSGStop_:; called by rst 10h
+  ld (hl),PSGLatch|PSGChannel0|PSGVolumeData|00Fh   ; latch channel 0, volume=0xF (silent)
+  ld (hl),PSGLatch|PSGChannel1|PSGVolumeData|00Fh   ; latch channel 1, volume=0xF (silent)
+  ld (hl),PSGLatch|PSGChannel2|PSGVolumeData|00Fh   ; latch channel 2, volume=0xF (silent)
+  ld (hl),PSGLatch|PSGChannel3|PSGVolumeData|00Fh   ; latch channel 3, volume=0xF (silent)
+  ret
+
+_dontLoop:
+  rst 08h              ; call PSGStop
+_done:
+  exx
 
 _mainLoop:
+  xor a
   ld hl, 08000h
   ld (hl),a
 _waitLoop:
-  ld a,(hl)
-  or a
+  add a,(hl)
   jr z, _waitLoop
   xor 0ffh
   jr nz, _runCommand
 PSGFrame:
-  ld a,d          ; check if we have got to play a tune
-  or a
+  add a,d         ; check if we have got to play a tune (a is 0 here)
   jr z, _waitLoop ; no music to play : return
   ld a,e          ; check if we have got to skip frames
   or a
   jr z,_noFrameSkip
 _skipFrame:
   dec e
-_endLoop:
-  xor a
   jr _mainLoop
 
 _runCommand: ; a is 2 (loop) or 1 (no loop)
-  call PSGStop ; keeps 'a' safe
+  rst 08h ; call PSGStop ; keeps 'a' safe
   cp 3
-  jr z,_endLoop
+  jr z,_mainLoop
   dec a
 ;PSGPlay:
   exx
   ld d,a                          ; loop flag in d'
   ld hl,_music_start_             ; music ptr in hl'
   push hl
-  pop ix  ;ld (PSGMusicLoopPoint),hl       ; loop pointer points to begin too
+  pop ix                          ; loop pointer points to begin too
   xor a
   ld c,a                          ; reset the substring len (for compression)
   exx
-  ld e,a                          ; PSGMusicSkipFrames in e: reset the skip frames
   ld d,PSG_PLAYING                ; PSGMusicStatus in d: set status to PSG_PLAYING
-  jr _mainLoop ; a = 0
+_preMainLoop:
+  ld e,a                          ; PSGMusicSkipFrames in e: reset the skip frames (or we got additional frames when coming from below)
+  jr _mainLoop
 
 _noFrameSkip:
   exx
 _intLoop:
   ld b,(hl)                      ; load PSG byte (in B)
   inc hl                         ; point to next byte
-  ld a,c                         ; ld a,(PSGMusicSubstringLen)    ; read substring len
-  or a
+  add a,c                        ; read substring len (a is 0 here)
   jr z,_continue                 ; check if it is 0 (we are not in a substring)
   dec c                          ; decrease len
   jr nz,_continue
   push iy
-  pop hl  ;ld hl,(PSGMusicSubstringRetAddr)  ; substring is over, retrieve return address
+  pop hl                         ; substring is over, retrieve return address
 
 _continue:
   ld a,b                         ; copy PSG byte into A
@@ -104,37 +119,41 @@ _continue:
   jr z,_noVolume                 ; jump if not volume data
   ; set volume
   ld (04000h),a
-_send2PSG_4001h:
-  ld (04001h),a                    ; output the byte
+_send2PSG:
+  ld (04001h),a                  ; output the byte
   jr _intLoop
 
 _noVolume:
   cp 0E0h
-  jr c,_send2PSG_4001h           ; send data to PSG if it is for channels 0-1 or 2
-  ld (04000h),a                       ; output the byte in noise register
+  jr c,_send2PSG                 ; send data to PSG if it is for channels 0-1 or 2
+  ld (04000h),a                  ; output the byte in noise register
   jr _intLoop
 
 _noLatch:
   cp PSGData
-  jr nc,_send2PSG_4001h          ; if < $40 then it is a command
+  jr nc,_send2PSG                ; if < $40 then it is a command
 ;_command:
   cp PSGWait
   jr z,_done                     ; no additional frames
   jr c,_otherCommands            ; other commands?
   and 007h                       ; take only the last 3 bits for skip frames
   exx
-  ld e,a                         ; we got additional frames
-  jr _endLoop                    ; frame done
+  jr _preMainLoop                ; frame done
+
 _otherCommands:
   cp PSGSubString
   jr nc,_substring
   or a                           ; cp PSGEnd (PSGEnd is 0)
-  jr z,_musicLoop
-;  cp PSGLoop
-;  ret nz                         ; 'ret' should never happen! if we do, it means the PSG file is probably corrupted, so we just RET
-;_setLoopPoint:
+  jr nz,_setLoopPoint
+  add a,d                        ; looping requested? (a is 0 here)
+  jr z,_dontLoop                 ; No:stop it! (tail call optimization)
+  push ix
+  pop hl
+  jr _intLoop
+
+_setLoopPoint:
   push hl
-  pop ix  ; ld (PSGMusicLoopPoint),hl
+  pop ix
   jr _intLoop
 
 _substring:
@@ -143,38 +162,13 @@ _substring:
   ld b,(hl)
   inc hl
   push hl
-  pop iy  ;ld (PSGMusicSubstringRetAddr),hl    ; save return address
+  pop iy
   ld hl,_music_start_
   add hl,bc                           ; make substring current
   sub PSGSubString-4                  ; len is value - $08 + 4
-  ld c,a                              ; ld (PSGMusicSubstringLen),a         ; save len
+  ld c,a                              ; save len
   jr _intLoop
 
-_musicLoop:
-  ld a,d               ; looping requested?
-  or a
-  jr nz,_doLoop                     ; No:stop it! (tail call optimization)
-  call PSGStop
-_done:
-  exx
-  jr _endLoop                    ; frame done
-_doLoop:
-  push ix
-  pop hl  ;ld hl,(PSGMusicLoopPoint)
-  jr _intLoop
-
-PSGStop:
-  ld hl,04000h
-  call PSGStop_
-  inc l ; hl = 04001h
-  ld d,PSG_STOPPED                               ; set status to PSG_STOPPED
-PSGStop_:
-  ld (hl),PSGLatch|PSGChannel0|PSGVolumeData|00Fh   ; latch channel 0, volume=0xF (silent)
-  ld (hl),PSGLatch|PSGChannel1|PSGVolumeData|00Fh   ; latch channel 1, volume=0xF (silent)
-  ld (hl),PSGLatch|PSGChannel2|PSGVolumeData|00Fh   ; latch channel 2, volume=0xF (silent)
-  ld (hl),PSGLatch|PSGChannel3|PSGVolumeData|00Fh   ; latch channel 3, volume=0xF (silent)
-  ret
-  
 _music_start_:
 
   END
