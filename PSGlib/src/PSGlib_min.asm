@@ -90,9 +90,9 @@ _runCommand: ; a is 2 (loop) or 1 (no loop)
   pop ix                          ; loop pointer points to begin too
   xor a
   ld c,a                          ; reset the substring len (for compression)
+_preMainLoop:
   exx
   ld d,PSG_PLAYING                ; PSGMusicStatus in d: set status to PSG_PLAYING
-_preMainLoop:
   ld e,a                          ; PSGMusicSkipFrames in e: reset the skip frames (or we got additional frames when coming from below)
   jr _mainLoop
 
@@ -101,7 +101,8 @@ _noFrameSkip:
 _intLoop:
   ld b,(hl)                      ; load PSG byte (in B)
   inc hl                         ; point to next byte
-  add a,c                        ; read substring len (a is 0 here)
+  ld a,c                         ; read substring len
+  or a
   jr z,_continue                 ; check if it is 0 (we are not in a substring)
   dec c                          ; decrease len
   jr nz,_continue
@@ -137,7 +138,6 @@ _noLatch:
   jr z,_done                     ; no additional frames
   jr c,_otherCommands            ; other commands?
   and 007h                       ; take only the last 3 bits for skip frames
-  exx
   jr _preMainLoop                ; frame done
 
 _otherCommands:
