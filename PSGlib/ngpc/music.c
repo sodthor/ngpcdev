@@ -60,9 +60,9 @@ void SL_SoundInit()
 }
 
 typedef enum {
-    PSGPlayNoRepeat = 1,
-    PSGPlay,
-    PSGStop
+    PSGStop = 1,
+    PSGPlayNoRepeat,
+    PSGPlay
 } PSG_COMMAND;
 
 void SL_LoadData(const u8 *data, u16 len)

@@ -44,12 +44,12 @@ void waitVBL()
 	Z80_COMM = 0xff; // PSG next frame
 }
 
-void playBGM(int cur)
+void playBGM(int cur, u8 loop)
 {
 	int j;
 	SL_StopBGM();
 	SL_LoadData(list[cur].data, list[cur].len);
-	SL_PlayBGM(0);
+	SL_PlayBGM(1-loop);
 	PrintDecimal(SCR_1_PLANE, 0, 13, 12, cur, 2);
 	while ((j=JOYPAD)&(J_A|J_B))
 		waitVBL();
@@ -72,20 +72,20 @@ void main()
     PrintString(SCR_1_PLANE, 0, 3, 16, "OPTION - SFX");
 
     SL_SoundInit();
-	playBGM(cur);
+	playBGM(cur, 0);
 	while (1)
 	{
 		if (j&J_A)
 		{
 			if (++cur>11)
 				cur = 0;
-			playBGM(cur);
+			playBGM(cur, 1);
 		}
 		else if (j&J_B)
 		{
 			if (--cur<0)
 				cur = 11;
-			playBGM(cur);
+			playBGM(cur, 1);
 		}
 		else if (j&J_OPTION)
 		{
