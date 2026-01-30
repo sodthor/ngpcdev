@@ -111,6 +111,7 @@ _intLoop:
 
 _continue:
   ld a,b                         ; copy PSG byte into A
+  ld bc, 04000h
   cp PSGLatch                    ; is it a latch?
   jr c,_noLatch                  ; if < $80 then it is NOT a latch
   
@@ -119,20 +120,21 @@ _continue:
   bit 4,a                        ; test if it is a volume
   jr z,_noVolume                 ; jump if not volume data
   ; set volume
-  ld (04000h),a
+  ld (bc),a
 _send2PSG:
-  ld (04001h),a                  ; output the byte
+  inc bc                         ; bc = 04001h
+_send2PSG_:
+  ld (bc),a                      ; output the byte to 04000h or 04001h
   jr _intLoop
 
 _noVolume:
   cp 0E0h
-  jr c,_send2PSG                 ; send data to PSG if it is for channels 0-1 or 2
-  ld (04000h),a                  ; output the byte in noise register
-  jr _intLoop
+  jr c,_send2PSG                 ; send data to PSG if it is for channels 0-1 or 2 (04001h)
+  jr _send2PSG_                  ; output the byte in noise register (04000h)
 
 _noLatch:
   cp PSGData
-  jr nc,_send2PSG                ; if < $40 then it is a command
+  jr nc,_send2PSG                ; if < $40 then it is a command -> send to 04001h
 ;_command:
   cp PSGWait
   jr z,_done                     ; no additional frames
