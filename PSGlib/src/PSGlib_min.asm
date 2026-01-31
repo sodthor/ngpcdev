@@ -32,73 +32,26 @@ PSGSubString   EQU 008h
 
 _start_z80:
   di
-  ld sp, PSGStop
+  ld sp, _psg_stopped ; stack: max 4 bytes : ret PSGStop x 2
 
-  ld d,PSG_STOPPED            ; PSGMusicStatus in d: set music status to PSG_STOPPED
+_psg_stopped:
+  ld d, PSG_STOPPED            ; PSGMusicStatus in d: set music status to PSG_STOPPED
   jr _mainLoop
-
-; stack: max 4 bytes : ret PSGStop x 2
 
 PSGStop: ; called by rst 08h
   ld hl,04000h
-  rst 10h ; call PSGStop_
+  call PSGStop_
   inc l ; hl = 04001h
-  ld d,PSG_STOPPED                                  ; set status to PSG_STOPPED
-  nop                                               ; filler to align PSGStop_ to 010h
-PSGStop_:; called by rst 10h
+PSGStop_:
   ld (hl),PSGLatch|PSGChannel0|PSGVolumeData|00Fh   ; latch channel 0, volume=0xF (silent)
   ld (hl),PSGLatch|PSGChannel1|PSGVolumeData|00Fh   ; latch channel 1, volume=0xF (silent)
   ld (hl),PSGLatch|PSGChannel2|PSGVolumeData|00Fh   ; latch channel 2, volume=0xF (silent)
   ld (hl),PSGLatch|PSGChannel3|PSGVolumeData|00Fh   ; latch channel 3, volume=0xF (silent)
   ret
 
-_dontLoop:
-  rst 08h              ; call PSGStop
-_done:
-  exx
-
-_mainLoop:
-  xor a
-  ld hl, 08000h
-  ld (hl),a
-_waitLoop:
-  add a,(hl)
-  jr z, _waitLoop
-  xor 0ffh
-  jr nz, _runCommand
-;PSGFrame:
-  add a,d         ; check if we have got to play a tune (a is 0 here)
-  jr z, _waitLoop ; no music to play : return
-  ld a,e          ; check if we have got to skip frames
-  or a
-  jr z,_noFrameSkip
-;_skipFrame:
-  dec e
-  jr _mainLoop
-
-_runCommand: ; a is 3 (loop) or 2 (no loop) or 1 (stop)
-  rst 08h ; call PSGStop ; keeps 'a' safe
-  dec a
-  jr z,_mainLoop
-  dec a
-;PSGPlay:
-  exx
-  ld e,a                          ; loop flag
-  ld hl,_music_start_             ; music ptr in hl'
-  push hl                         ; default loop pointer points to begin too
-  pop ix
-  xor a
-  ld d,a                          ; reset the substring len (for compression)
-_setFrameSkip:
-  exx
-  ld d,PSG_PLAYING                ; PSGMusicStatus in d: set status to PSG_PLAYING
-  and 007h                        ; take only the last 3 bits for skip frames
-  ld e,a                          ; PSGMusicSkipFrames in e: reset the skip frames (or we got additional frames when coming from below)
-  jr _mainLoop
-
-_noFrameSkip:
-  exx
-_intLoop:
+; rst 18h
+  pop bc ; remove return address from stack
+;_intLoop:
   ld b,(hl)                      ; load PSG byte (in B)
   inc hl                         ; point to next byte
   ld a,d                         ; read substring len
@@ -122,15 +75,66 @@ _continue:
   ; set volume
   ld (bc),a
 _send2PSG:
-  inc bc                         ; bc = 04001h
+  inc c                          ; bc = 04001h
 _send2PSG_:
   ld (bc),a                      ; output the byte to 04000h or 04001h
-  jr _intLoop
+  rst 18h ; jr _intLoop
 
 _noVolume:
   cp 0E0h
   jr c,_send2PSG                 ; send data to PSG if it is for channels 0-1 or 2 (04001h)
   jr _send2PSG_                  ; output the byte in noise register (04000h)
+
+_dontLoop:
+  exx
+_stop_command:
+  rst 08h              ; call PSGStop
+  jr _psg_stopped
+
+_done:
+  exx
+
+_mainLoop:
+  xor a
+  ld hl, 08000h
+  ld (hl),a
+_waitLoop:
+  add a,(hl)
+  jr z, _waitLoop
+  dec a
+  jr nz, _runCommand
+;PSGFrame:
+  add a,d            ; check if we have got to play a tune (a is 0 here)
+  jr z, _waitLoop    ; no music to play : return
+  ld a,e             ; check if we have got to skip frames
+  or a
+  jr z,_noFrameSkip
+;_skipFrame:
+  dec e
+  jr _mainLoop
+
+_runCommand: ; a is 3 (loop) or 2 (no loop) or 1 (stop)
+  dec a
+  jr z,_stop_command
+;PSGPlay:
+  exx
+  dec a
+  ld e,a                          ; loop flag
+  ld hl,_music_start_             ; music ptr in hl'
+  push hl                         ; default loop pointer points to begin too
+  pop ix
+  xor a
+  ld d,a                          ; reset the substring len (for compression)
+_setFrameSkip:
+  exx
+  ld d,PSG_PLAYING                ; PSGMusicStatus in d: set status to PSG_PLAYING
+  and 007h                        ; take only the last 3 bits for skip frames
+  ld e,a                          ; PSGMusicSkipFrames in e: reset the skip frames (or we got additional frames when coming from below)
+  jr _mainLoop
+
+_noFrameSkip:
+  exx
+  rst 18h
 
 _noLatch:
   cp PSGData
@@ -148,12 +152,12 @@ _noLatch:
   jr z,_dontLoop                 ; No:stop it! (tail call optimization)
   push ix
   pop hl
-  jr _intLoop
+  rst 18h ; jr _intLoop
 
 _setLoopPoint:
   push hl
   pop ix
-  jr _intLoop
+  rst 18h ; jr _intLoop
 
 _substring:
   ld c,(hl)                      ; load substring address (offset)
@@ -166,7 +170,7 @@ _substring:
   add hl,bc                      ; make substring current
   sub PSGSubString-4             ; len is value - $08 + 4
   ld d,a                         ; save len
-  jr _intLoop
+  rst 18h ; jr _intLoop
 
 _music_start_:
 
