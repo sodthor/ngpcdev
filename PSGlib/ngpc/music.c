@@ -54,13 +54,13 @@ void SL_SoundInit()
     DMA0_INT = dma0Int;
     __asm("ei");
 
-    Z80_COMM = 0xff;
+    Z80_COMM = 1;
     SL_SoundCPUStart();
     SL_WaitZ80();
 }
 
 typedef enum {
-    PSGStop = 1,
+    PSGStop = 2,
     PSGPlayNoRepeat,
     PSGPlay
 } PSG_COMMAND;
@@ -75,13 +75,13 @@ void SL_LoadData(const u8 *data, u16 len)
 
 void SL_StopBGM(u8 sync)
 {
-    Z80_COMM = PSGStop ^ 0xff;
+    Z80_COMM = PSGStop;
     SL_WaitZ80();
 }
 
 void SL_PlayBGM(u8 noRepeat)
 {
-    Z80_COMM = (noRepeat ? PSGPlayNoRepeat : PSGPlay) ^ 0xff;
+    Z80_COMM = noRepeat ? PSGPlayNoRepeat : PSGPlay;
     SL_WaitZ80();
 }
 

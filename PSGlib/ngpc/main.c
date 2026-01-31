@@ -41,7 +41,7 @@ void waitVBL()
 	VBCounter = 0;
 	while (!VBCounter)
 		__ASM("  NOP");
-	Z80_COMM = 0xff; // PSG next frame
+	Z80_COMM = 1; // PSG next frame
 }
 
 void playBGM(int cur, u8 loop)
