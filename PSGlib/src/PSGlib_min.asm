@@ -7,7 +7,7 @@
     org    0h
 
 PSG_STOPPED    EQU 0
-PSG_PLAYING    EQU 1
+PSG_PLAYING    EQU 7
 
 PSGLatch       EQU 080h
 PSGData        EQU 040h
@@ -91,50 +91,9 @@ _stop_command:
   rst 08h              ; call PSGStop
   jr _psg_stopped
 
-_done:
-  exx
-
-_mainLoop:
-  xor a
-  ld hl, 08000h
-  ld (hl),a
-_waitLoop:
-  add a,(hl)
-  jr z, _waitLoop
-  dec a
-  jr nz, _runCommand
-;PSGFrame:
-  add a,d            ; check if we have got to play a tune (a is 0 here)
-  jr z, _waitLoop    ; no music to play : return
-  ld a,e             ; check if we have got to skip frames
-  or a
-  jr z,_noFrameSkip
-;_skipFrame:
-  dec e
-  jr _mainLoop
-
-_runCommand: ; a is 3 (loop) or 2 (no loop) or 1 (stop)
-  dec a
-  jr z,_stop_command
-;PSGPlay:
-  exx
-  dec a
-  ld e,a                          ; loop flag
-  ld hl,_music_start_             ; music ptr in hl'
-  push hl                         ; default loop pointer points to begin too
-  pop ix
-  xor a
-  ld d,a                          ; reset the substring len (for compression)
-_setFrameSkip:
-  exx
-  ld d,PSG_PLAYING                ; PSGMusicStatus in d: set status to PSG_PLAYING
-  and 007h                        ; take only the last 3 bits for skip frames
-  ld e,a                          ; PSGMusicSkipFrames in e: reset the skip frames (or we got additional frames when coming from below)
-  jr _mainLoop
-
 _noFrameSkip:
   exx
-  rst 18h
+  rst 18h ; jr _intLoop
 
 _noLatch:
   cp PSGData
@@ -171,6 +130,46 @@ _substring:
   sub PSGSubString-4             ; len is value - $08 + 4
   ld d,a                         ; save len
   rst 18h ; jr _intLoop
+
+_runCommand: ; a is 3 (loop) or 2 (no loop) or 1 (stop)
+  dec a
+  jr z,_stop_command
+;PSGPlay:
+  exx
+  dec a
+  ld e,a                          ; loop flag
+  ld hl,_music_start_             ; music ptr in hl'
+  push hl                         ; default loop pointer points to begin too
+  pop ix
+  xor a
+  ld d,a                          ; reset the substring len (for compression)
+_setFrameSkip:
+  exx
+  ld d,PSG_PLAYING                ; PSGMusicStatus in d: set status to PSG_PLAYING
+  and d                           ; take only the last 3 bits for skip frames (that's why PSG_PLAYING=7)
+  ld e,a                          ; PSGMusicSkipFrames in e: reset the skip frames (or we got additional frames when coming from below)
+  exx
+_done:
+  exx
+
+_mainLoop:
+  xor a
+  ld hl, 08000h
+  ld (hl),a
+_waitLoop:
+  add a,(hl)
+  jr z, _waitLoop
+  dec a
+  jr nz, _runCommand
+;PSGFrame:
+  add a,d            ; check if we have got to play a tune (a is 0 here)
+  jr z, _waitLoop    ; no music to play : return
+  ld a,e             ; check if we have got to skip frames
+  or a
+  jr z,_noFrameSkip
+;_skipFrame:
+  dec e
+  jr _mainLoop
 
 _music_start_:
 
