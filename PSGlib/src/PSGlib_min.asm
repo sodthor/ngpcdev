@@ -150,8 +150,7 @@ _waitLoop:
 ;PSGFrame:
   or d               ; check if we have got to play a tune (a is 0 here)
   jr z, _waitLoop    ; no music to play : return
-  ld a,e             ; check if we have got to skip frames
-  or a
+  and e              ; check if we have got to skip frames (a  is not 0 here)
   jr z,_noFrameSkip
 ;_skipFrame:
   dec e
