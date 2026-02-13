@@ -6,7 +6,7 @@
     cpu    z80
     org    0h
 
-;PSG_STOPPED    EQU 0
+PSG_STOPPED    EQU 0
 PSG_PLAYING    EQU 7
 
 PSGLatch       EQU 080h
@@ -32,35 +32,38 @@ PSGSubString   EQU 008h
 
 _start_z80:
   di
-  ld sp, _stack    ; stack: max 5 bytes
+  ld sp, _stack ; stack: max 6 bytes
   jr _init
 _stack:
 
-_skipFrame:
-  dec e
-  jr _mainLoop
+_noFrameSkip:
+  exx
+  rst 20h ; jr _intLoop
 
-;PSGStop_:  ; called by rst 08h
+;PSGStop_: called by rst 08h
   ld (hl),PSGLatch|PSGChannel0|PSGVolumeData|00Fh   ; latch channel 0, volume=0xF (silent)
   ld (hl),PSGLatch|PSGChannel1|PSGVolumeData|00Fh   ; latch channel 1, volume=0xF (silent)
   ld (hl),PSGLatch|PSGChannel2|PSGVolumeData|00Fh   ; latch channel 2, volume=0xF (silent)
   ld (hl),PSGLatch|PSGChannel3|PSGVolumeData|00Fh   ; latch channel 3, volume=0xF (silent)
   ret
 
+_setLoopPoint:
+  push hl
+  pop ix
+  rst 20h ; jr _intLoop
+
 _dontLoop:
   exx
 PSGStop:
-  ld hl, 04000h
+  ld hl,04000h
   rst 08h
-  inc l ; hl = 04001h
+  inc l
   rst 08h
 _init:
-  xor a
-  ld d,a                         ; PSGMusicStatus in d: set status to PSG_STOPPED (0)
-  ld e,a                         ; PSGMusicSkipFrames in e: reset the skip frames
+  ld d,PSG_STOPPED                         ; PSGMusicStatus in d: set status to PSG_STOPPED (0)
   jr _mainLoop
 
-; called by rst 20h
+; rst 20h
   pop bc ; remove return address from stack
 ;_intLoop:
   ld b,(hl)                      ; load PSG byte (in B)
@@ -108,15 +111,10 @@ _noLatch:
   jr nc,_substring
   or a                           ; cp PSGEnd (PSGEnd is 0)
   jr nz,_setLoopPoint
-  add a,e                        ; looping requested? (a is 0 here)
+  or e                           ; looping requested? (a is 0 here)
   jr z,_dontLoop                 ; No:stop it! (tail call optimization)
   push ix
   pop hl
-  rst 20h ; jr _intLoop
-
-_setLoopPoint:
-  push hl
-  pop ix
   rst 20h ; jr _intLoop
 
 _runCommand: ; a is 3 (loop) or 2 (no loop) or 1 (stop)
@@ -150,13 +148,14 @@ _waitLoop:
   dec a
   jr nz, _runCommand
 ;PSGFrame:
-  or d             ; check if we have got to play a tune (a is 0 here)
-  jr z, _waitLoop  ; no music to play : return
-  or e             ; check if we have got to skip frames
-  jr nz,_skipFrame
-;_noFrameSkip:
-  exx
-  rst 20h ; jr _intLoop
+  or d               ; check if we have got to play a tune (a is 0 here)
+  jr z, _waitLoop    ; no music to play : return
+  ld a,e             ; check if we have got to skip frames
+  or a
+  jr z,_noFrameSkip
+;_skipFrame:
+  dec e
+  jr _mainLoop
 
 _substring:
   ld c,(hl)                      ; load substring address (offset)
