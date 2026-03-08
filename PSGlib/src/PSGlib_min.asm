@@ -63,13 +63,13 @@ _init:
   ld d,PSG_STOPPED                         ; PSGMusicStatus in d: set status to PSG_STOPPED (0)
   jr _mainLoop
 
-; rst 20h
+; called by rst 20h
   pop bc ; remove return address from stack
-;_intLoop:
-  ld b,(hl)                      ; load PSG byte (in B)
+_intLoop:
+  ld a,(hl)                      ; load PSG byte directly into A!
   inc hl                         ; point to next byte
-  ld a,d                         ; read substring len
-  or a
+  dec d                          ; test d for 0
+  inc d                          ; restoring d, sets Z if d==0!
   jr z,_continue                 ; check if it is 0 (we are not in a substring)
   dec d                          ; decrease len
   jr nz,_continue
@@ -77,7 +77,6 @@ _init:
   pop hl                         ; substring is over, retrieve return address (PSGMusicSubstringRetAddr)
 
 _continue:
-  ld a,b                         ; copy PSG byte into A
   ld bc, 04000h
   cp PSGLatch                    ; is it a latch?
   jr c,_noLatch                  ; if < $80 then it is NOT a latch
