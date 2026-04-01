@@ -36,6 +36,8 @@ void SL_SoundInit()
     // Copy PSG lib driver to z80
     for (i = 0; i < PSGLIB_SIZE; i++)
         ram[i] = PSGLIB[i];
+    for (i = PSGLIB_SIZE; i < 4096; i++)
+		ram[i] = 0;
 
     // Config timer 2 for PCM playback
     TRUN &= (TIMER2_ON | TIMER3_ON) ^ 0xff;
@@ -54,9 +56,8 @@ void SL_SoundInit()
     DMA0_INT = dma0Int;
     __asm("ei");
 
-    Z80_COMM = 1;
+    Z80_COMM = 0;
     SL_SoundCPUStart();
-    SL_WaitZ80();
 }
 
 typedef enum {
@@ -69,20 +70,21 @@ void SL_LoadData(const u8 *data, u16 len)
 {
     u8 *ram = Z80_RAM;
     u16 i;
+    SL_WaitZ80();
     for (i = 0; i < len && i + PSGLIB_SIZE < 4096; ++i)
         ram[i + PSGLIB_SIZE] = data[i];
 }
 
 void SL_StopBGM(u8 sync)
 {
-    Z80_COMM = PSGStop;
     SL_WaitZ80();
+    Z80_COMM = PSGStop;
 }
 
 void SL_PlayBGM(u8 noRepeat)
 {
-    Z80_COMM = noRepeat ? PSGPlayNoRepeat : PSGPlay;
     SL_WaitZ80();
+    Z80_COMM = noRepeat ? PSGPlayNoRepeat : PSGPlay;
 }
 
 /*

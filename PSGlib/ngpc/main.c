@@ -41,18 +41,23 @@ void waitVBL()
 	VBCounter = 0;
 	while (!VBCounter)
 		__ASM("  NOP");
+    SL_WaitZ80();
 	Z80_COMM = 1; // PSG next frame
+}
+
+void waitRelease() {
+	int j;
+	while ((j=JOYPAD)&(J_A|J_B))
+		waitVBL();
 }
 
 void playBGM(int cur, u8 loop)
 {
-	int j;
 	SL_StopBGM();
 	SL_LoadData(list[cur].data, list[cur].len);
 	SL_PlayBGM(1-loop);
 	PrintDecimal(SCR_1_PLANE, 0, 13, 12, cur, 2);
-	while ((j=JOYPAD)&(J_A|J_B))
-		waitVBL();
+	waitRelease();
 }
 
 void main()
@@ -90,8 +95,7 @@ void main()
 		else if (j&J_OPTION)
 		{
 			SL_PlayPCM((u8*)CHIME_PCM, CHIME_PCM_SIZE);
-			while ((j=JOYPAD)&J_OPTION)
-				waitVBL();
+			waitRelease();
 		}
 		else
 			waitVBL();
