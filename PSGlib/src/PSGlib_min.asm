@@ -22,6 +22,7 @@ PSGWait        EQU 038h
 PSGSubString   EQU 008h
 
 ; in registers:
+; hl: 08000h 
 ; d : PSG_STOPPED/PSG_PLAYING
 ; e : frames to skip
 ; b': substring length
@@ -50,13 +51,13 @@ _stopLoop:
   ret
 
 ; called by rst 010h
-  ; 32 bytes
+  ; 31 bytes
   pop de ; remove return address from stack
 ;_intLoop:
   ld a,(hl)                      ; load PSG byte directly into A!
   inc hl                         ; point to next byte
   inc b                          ; test b for 0
-  dec b                          ; restoring d, sets Z if b==0
+  dec b                          ; restoring b, sets Z if b==0
   jr z,_continue                 ; check if it is 0 (we are not in a substring)
   djnz _continue                 ; decrease len
   pop hl                         ; substring completed, get back music ptr from stack
@@ -64,8 +65,7 @@ _continue:
   ld de, 04000h
   cp PSGLatch                    ; is it a latch?
   jr c,_noLatch                  ; if < $80 then it is NOT a latch
-  ; we have got the latch PSG byte both in A and in B
-  ; and we have to check if the value should pass to PSG or not
+  ; we have got the latch PSG byte in A and we have to check if the value should pass to PSG or not
   bit 4,a                        ; test if it is a volume
   jr z,_noVolume                 ; jump if not volume data
 ;_setVolume
@@ -115,7 +115,7 @@ _substring:
   rst 010h ; jr _intLoop
 
 _dontLoop:
-  ; 13 bytes
+  ; 14 bytes
   exx
 PSGStop:
   ld sp, _stack                  ; to be sure stack is clean
