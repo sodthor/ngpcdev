@@ -9,11 +9,11 @@
 #include "boss_battle.h"
 #include "burning_town.h"
 #include "GnG07.h"
-#include "GNG13.h"
+#include "GnG13.h"
 #include "mastertracker.h"
 #include "ryu_ending.h"
 #include "Sonic05.h"
-#include "SONIC12.h"
+#include "Sonic12.h"
 #include "chime.h"
 
 typedef struct {
