@@ -86,7 +86,6 @@ _noLatch:
   jr nc,_send2PSG                ; if < $40 then it is a command else send to 04001h
 ;_command:
   cp PSGWait
-  jr z,_done                     ; no additional frames
   jr nc,_setFrameSkip            ; other commands?
 ;_otherCommands:
   cp PSGSubString
@@ -123,8 +122,22 @@ PSGStop:
   rst 08h
   inc c
   rst 08h
+  ld d, 0                        ; PSGMusicStatus in d: set status to PSG_STOPPED
+_mainLoop:
   xor a
-  ld d,a                         ; PSGMusicStatus in d: set status to PSG_STOPPED
+  ld (hl),a
+_waitLoop:
+  add a,(hl)
+  jr z, _waitLoop
+  dec a
+  jr nz, _runCommand
+;PSGFrame:
+  or d               ; check if we have got to play a tune (a is 0 here)
+  jr z, _mainLoop    ; no music to play : return
+  and e              ; check if we have got to skip frames (a is not 0 here)
+  jr z,_noFrameSkip
+;_skipFrame:
+  dec e
   jr _mainLoop
 
 _runCommand: ; a is 3 (loop) or 2 (no loop) or 1 (stop)
@@ -144,24 +157,6 @@ _setFrameSkip:
   ld d,PSG_PLAYING                ; PSGMusicStatus in d: set status to PSG_PLAYING
   and d                           ; take only the last 3 bits for skip frames (that's why PSG_PLAYING=7)
   ld e,a                          ; PSGMusicSkipFrames in e: reset the skip frames (or we got additional frames when coming from below)
-  exx
-_done:
-  exx
-_mainLoop:
-  xor a
-  ld (hl),a
-_waitLoop:
-  add a,(hl)
-  jr z, _waitLoop
-  dec a
-  jr nz, _runCommand
-;PSGFrame:
-  or d               ; check if we have got to play a tune (a is 0 here)
-  jr z, _mainLoop    ; no music to play : return
-  and e              ; check if we have got to skip frames (a is not 0 here)
-  jr z,_noFrameSkip
-;_skipFrame:
-  dec e
   jr _mainLoop
 
 _music_start_:
