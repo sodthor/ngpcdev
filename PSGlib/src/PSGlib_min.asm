@@ -118,6 +118,8 @@ PSGStop:
   rst 08h
   dec c                          ; bc = 04000h
   ld d,c                         ; PSGMusicStatus in d: set status to PSG_STOPPED (0)
+_skipFrame:
+  dec e
 _mainLoop:
   xor a
   ld (hl),a
@@ -130,13 +132,8 @@ _waitLoop:
   or d               ; check if we have got to play a tune (a is 0 here)
   jr z, _mainLoop    ; no music to play : return
   and e              ; check if we have got to skip frames (a is 7 here)
-  jr z,_noFrameSkip
-;_skipFrame:
-  dec e
-  jr _mainLoop
-
-_noFrameSkip:
-  ; 2 bytes
+  jr nz, _skipFrame
+;_noFrameSkip:
   exx
   rst 010h ; jr _intLoop
 
