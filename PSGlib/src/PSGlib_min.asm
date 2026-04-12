@@ -30,16 +30,11 @@ PSGSubString   EQU 008h
 ;hl': music ptr
 
 _start_z80:
-  ; 6 bytes
-  di
+  ; 8 bytes
   ld hl, 08000h
+  ld bc, 04000h
   jr PSGStop
 _stack: ; 6 bytes needed: loop, substring and rst
-
-_noFrameSkip:
-  ; 2 bytes
-  exx
-  rst 010h ; jr _intLoop
 
 ;PSGStop_: called by rst 08h
   ; 8 bytes
@@ -81,7 +76,7 @@ _noVolume:
   jr _send2PSG_                  ; output the byte in noise register (04000h)
 
 _noLatch:
-  ; 24 bytes
+  ; 22 bytes
   cp PSGData
   jr nc,_send2PSG                ; if < $40 then it is a command else send to 04001h
 ;_command:
@@ -114,15 +109,15 @@ _substring:
   rst 010h ; jr _intLoop
 
 _dontLoop:
-  ; 14 bytes
+  ; 26 bytes
   exx
 PSGStop:
   ld sp, _stack                  ; to be sure stack is clean
-  ld bc,04000h
   rst 08h
-  inc c
+  inc c                          ; bc = 04001h
   rst 08h
-  ld d, 0                        ; PSGMusicStatus in d: set status to PSG_STOPPED
+  dec c                          ; bc = 04000h
+  ld d,c                         ; PSGMusicStatus in d: set status to PSG_STOPPED (0)
 _mainLoop:
   xor a
   ld (hl),a
@@ -134,14 +129,19 @@ _waitLoop:
 ;PSGFrame:
   or d               ; check if we have got to play a tune (a is 0 here)
   jr z, _mainLoop    ; no music to play : return
-  and e              ; check if we have got to skip frames (a is not 0 here)
+  and e              ; check if we have got to skip frames (a is 7 here)
   jr z,_noFrameSkip
 ;_skipFrame:
   dec e
   jr _mainLoop
 
+_noFrameSkip:
+  ; 2 bytes
+  exx
+  rst 010h ; jr _intLoop
+
 _runCommand: ; a is 3 (loop) or 2 (no loop) or 1 (stop)
-  ; 36 bytes
+  ; 18 bytes
   dec a
   jr z,PSGStop
 ;PSGPlay:
@@ -155,8 +155,7 @@ _runCommand: ; a is 3 (loop) or 2 (no loop) or 1 (stop)
 _setFrameSkip:
   exx
   ld d,PSG_PLAYING                ; PSGMusicStatus in d: set status to PSG_PLAYING
-  and d                           ; take only the last 3 bits for skip frames (that's why PSG_PLAYING=7)
-  ld e,a                          ; PSGMusicSkipFrames in e: reset the skip frames (or we got additional frames when coming from below)
+  ld e,a                          ; PSGMusicSkipFrames in e: reset the skip frames (higher bits ignored)
   jr _mainLoop
 
 _music_start_:
