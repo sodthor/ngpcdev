@@ -23,6 +23,7 @@ PSGSubString   EQU 008h
 
 ; in registers:
 ; hl: 08000h 
+; bc: 04000h
 ; d : PSG_STOPPED/PSG_PLAYING
 ; e : frames to skip
 ; b': substring length
@@ -49,7 +50,7 @@ _stopLoop:
   ; 31 bytes
   pop de ; remove return address from stack
 ;_intLoop:
-  ld a,(hl)                      ; load PSG byte directly into A!
+  ld a,(hl)                      ; load PSG byte directly into A
   inc hl                         ; point to next byte
   inc b                          ; test b for 0
   dec b                          ; restoring b, sets Z if b==0
@@ -76,8 +77,8 @@ _noVolume:
   jr _send2PSG_                  ; output the byte in noise register (04000h)
 
 _noLatch:
-  ; 22 bytes
-  cp PSGData
+  ; 21 bytes
+  cp d                           ; d is 040h here
   jr nc,_send2PSG                ; if < $40 then it is a command else send to 04001h
 ;_command:
   cp PSGWait
@@ -85,14 +86,14 @@ _noLatch:
 ;_otherCommands:
   cp PSGSubString
   jr nc,_substring
-  pop de
+  pop de                         ; get current loop point
   or a                           ; cp PSGEnd (PSGEnd is 0)
   jr nz,_setLoopPoint
   or c                           ; looping requested? (a is 0 here)
   jr z,_dontLoop                 ; No:stop it! (tail call optimization)
-  ex hl,de
+  ex hl,de                       ; reset hl to loop point
 _setLoopPoint:
-  push hl
+  push hl                        ; save loop point in stack
   rst 010h ; jr _intLoop
 
 _substring:
