@@ -51,13 +51,13 @@ _stopLoop:
   pop de ; remove return address from stack
 ;_intLoop:
   ld a,(hl)                      ; load PSG byte directly into A
-  inc hl                         ; point to next byte
   inc b                          ; test b for 0
   dec b                          ; restoring b, sets Z if b==0
   jr z,_continue                 ; check if it is 0 (we are not in a substring)
   djnz _continue                 ; decrease len
   pop hl                         ; substring completed, get back music ptr from stack
 _continue:
+  inc hl                         ; point to next byte
   ld de, 04000h
   cp PSGLatch                    ; is it a latch?
   jr c,_noLatch                  ; if < $80 then it is NOT a latch
@@ -97,12 +97,11 @@ _setLoopPoint:
   rst 010h ; jr _intLoop
 
 _substring:
-  ; 13 bytes
+  ; 12 bytes
   ld e,(hl)                      ; load substring address (offset)
   inc hl
   ld d,(hl)
-  inc hl
-  push hl
+  push hl                        ; do not increment hl: will be done on "_continue"
   ld hl,_music_start_
   add hl,de                      ; make substring current
   sub PSGSubString-4             ; len is value - $08 + 4
@@ -123,9 +122,9 @@ _skipFrame:
   dec e
 _mainLoop:
   xor a
-  ld (hl),a
+  ld (hl),a                      ; clear comm
 _waitLoop:
-  add a,(hl)
+  add a,(hl)                     ; check comm
   jr z, _waitLoop
   dec a
   jr nz, _runCommand
