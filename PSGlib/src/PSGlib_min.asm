@@ -142,16 +142,16 @@ _runCommand: ; a is 3 (loop) or 2 (no loop) or 1 (stop)
   dec a
   jr z,PSGStop
 ;PSGPlay:
+  ld d,PSG_PLAYING                ; PSGMusicStatus in d: set status to PSG_PLAYING
   exx
   dec a
-  ld c,a                          ; loop flag
+  ld c,a                          ; loop flag in c'
   ld hl,_music_start_             ; music ptr in hl'
-  push hl                         ; default loop pointer points to begin too
-  xor a
-  ld b,a                          ; reset the substring len (for compression)
+  push hl                         ; default loop pointer points to _music_start_
+  ld b,h                          ; reset the substring len in b' (for compression), here h' is 0 as _music_start_ is < 256
+  ; here a is 0 or 1 and will be used as initial frameskip in e
 _setFrameSkip:
   exx
-  ld d,PSG_PLAYING                ; PSGMusicStatus in d: set status to PSG_PLAYING
   ld e,a                          ; PSGMusicSkipFrames in e: reset the skip frames (higher bits ignored)
   jr _mainLoop
 
