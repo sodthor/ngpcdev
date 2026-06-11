@@ -160,24 +160,33 @@ public class Compress3 {
 					offsets.put(substring, len);
 					len = putInBuffer(out, len, result, substring);
 				} else {
-					// try to save more bytes by finding orphan string chunks in written bytes
-					int m = chunkSize(len, result, substring, length);
-					if (m >= 0) {
-						for (int i = 0; i < length; i += m) {
-							String chunk = substring.substring(i, Math.min(length, i + m));
-							int idx = chunk.length() >= MIN_LEN * 3 && noSubstring(chunk) ? result.lastIndexOf(chunk) : -1;
-							if (idx >= 0) {
-								len = putIndexedValue(out, len, result, chunk.length() / 3, idx / 3, chunk);
-							} else {
-								len = putInBuffer(out, len, result, chunk);
+					// optimal greedy LZ77 with lazy evaluation
+					int i = 0;
+					while (i < length) {
+						int[] match0 = findBestMatch(substring, i, length, result, len, maxRelative);
+						int bestMatchLen = match0[0];
+						int bestMatchIdx = match0[1];
+
+						if (bestMatchLen >= MIN_LEN * 3) {
+							if (i + 3 < length) {
+								int[] match1 = findBestMatch(substring, i + 3, length, result, len, maxRelative);
+								if (match1[0] > bestMatchLen) {
+									bestMatchLen = 0; // fallback to literal
+								}
 							}
 						}
-					} else {
-						len = putInBuffer(out, len, result, substring);
+
+						if (bestMatchLen >= MIN_LEN * 3) {
+							String chunk = substring.substring(i, i + bestMatchLen);
+							len = putIndexedValue(out, len, result, bestMatchLen / 3, bestMatchIdx / 3, chunk);
+							i += bestMatchLen;
+						} else {
+							String chunk = substring.substring(i, i + 3);
+							len = putInBuffer(out, len, result, chunk);
+							i += 3;
+						}
 					}
 				}
-			} else if (length == 9) {
-				len = putInBuffer(out, len, result, substring);
 			} else {
 				if (key && offset == null) {
 					String including = included.get(substring);
@@ -272,38 +281,38 @@ public class Compress3 {
 		return len;
 	}
 
-	private static int chunkSize(int len, StringBuilder result, String substring, int length) {
-		int rl = result.length();
-		int m = -1;
-		int minLen = result.length() + substring.length();
-		for (int l = length; l >= MIN_LEN * 3; l -= 3) {
-			for (int i = 0; i < length; i += l) {
-				String chunk = substring.substring(i, Math.min(length, i + l));
-				int idx = chunk.length() >= MIN_LEN * 3 && noSubstring(chunk) ? result.lastIndexOf(chunk) : -1;
+	private static int[] findBestMatch(String substring, int i, int length, StringBuilder result, int len, int maxRelative) {
+		int bestMatchLen = 0;
+		int bestMatchIdx = -1;
+		int bestSavings = -1;
+
+		for (int matchLen = Math.min(MAX_LEN * 3, length - i); matchLen >= MIN_LEN * 3; matchLen -= 3) {
+			String chunk = substring.substring(i, i + matchLen);
+			if (noSubstring(chunk)) {
+				int idx = result.lastIndexOf(chunk);
 				if (idx >= 0) {
-					int offset = (result.length() + 3 - idx) / 3;
-					if (maxRelative <= 0 || offset > maxRelative + l) {
-						if (chunk.length() == 9) {
-							result.append(chunk); // no gain with a substring
-						} else if (maxRelative > 0) {
-							result.append(String.format("%02x:%02x:%02x:", (byte) (8 + chunk.length() / 3 - MIN_LEN), (byte) (offset / 256), (byte) (offset % 256)));
-						} else {
-							result.append(String.format("%02x:%02x:%02x:", (byte) (8 + chunk.length() / 3 - MIN_LEN), (byte) (offset % 256), (byte) (offset / 256)));
+					int l = matchLen / 3;
+					int offset = idx / 3;
+					int currentLen = len + 1;
+					int dist = currentLen - offset;
+					int cost = (maxRelative <= 0 || dist > maxRelative + l) ? 3 : 2;
+					if (cost == 3 && l == 3) cost = 3;
+
+					int savings = l - cost;
+					if (savings > bestSavings) {
+						bestSavings = savings;
+						bestMatchLen = matchLen;
+						bestMatchIdx = idx;
+					} else if (savings == bestSavings) {
+						if (matchLen > bestMatchLen) {
+							bestMatchLen = matchLen;
+							bestMatchIdx = idx;
 						}
-					} else {
-						result.append(String.format("%02x:%02x:", (byte) (8 + chunk.length() / 3 - MIN_LEN), (byte) (l - offset)));
 					}
-				} else {
-					result.append(chunk);
 				}
 			}
-			if (result.length() < minLen) {
-				minLen = result.length();
-				m = l;
-			}
-			result.setLength(rl);
 		}
-		return m;
+		return new int[] { bestMatchLen, bestMatchIdx, bestSavings };
 	}
 
 	private static String rebuildLists(Map<String, Integer> frequency, Map<String, Integer> gains, Set<String> used,
