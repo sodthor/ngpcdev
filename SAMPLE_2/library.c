@@ -18,7 +18,7 @@ u8 SFXInstalled;
 // dummy Interrupt function used for interrupt that are currently
 // unused. To add an interrupt simply supply your own routine in the
 // InitNGPC routine in the interrupt vector table initialisation
-void __interrupt DummyFunction(void) {}
+void __interrupt DummyInterrupt(void) {}
 
 
 //////////////////////////////////////////////////////////////////////////////
@@ -35,16 +35,16 @@ void __interrupt VBInterrupt(void)
    // check for power down
    if (USR_SHUTDOWN)
    {
-	  SysShutdown();
-	  while (1);
+   SysShutdown();
+   while (1);
    }
    
    // increment a counter
    VBCounter++;
 
    if (SFXInstalled)
-	  SFXPulse = 1;
-   
+   SFXPulse = 1;
+
    // TODO: add any other VBI code here.
 }
 
@@ -58,8 +58,8 @@ void InitNGPC(void)
    // Set NGP or NGPC mode
    if (OS_VERSION == 0)
    {
-	  (*(u8*)0x6f83) &= ~8; // res 3
-	  (*(u8*)0x6da0) = 0;
+   (*(u8*)0x6f83) &= ~8; // res 3
+   (*(u8*)0x6da0) = 0;
    }
 
    // set user answer
@@ -67,26 +67,28 @@ void InitNGPC(void)
 
    // User hasn't called InstallSoundDriver yet
    SFXInstalled = 0;
+
+   DISABLE_INTERRUPTS;
    
    // install user interrupt vectors
-   SWI3_INT = DummyFunction;
-   SWI4_INT = DummyFunction;
-   SWI5_INT = DummyFunction;
-   SWI6_INT = DummyFunction;
-   RTCI_INT = DummyFunction;
+   SWI3_INT = DummyInterrupt;
+   SWI4_INT = DummyInterrupt;
+   SWI5_INT = DummyInterrupt;
+   SWI6_INT = DummyInterrupt;
+   RTCI_INT = DummyInterrupt;
    VBL_INT = VBInterrupt;
-   Z80_INT = DummyFunction;
-   HBL_INT = DummyFunction;
-   TI0_INT = DummyFunction;
-   TI1_INT = DummyFunction;
-   TI2_INT = DummyFunction;
-   TI3_INT = DummyFunction;
-   STX_INT = DummyFunction;
-   SRX_INT = DummyFunction;
-   DMA0_INT = DummyFunction;
-   DMA1_INT = DummyFunction;
-   DMA2_INT = DummyFunction;
-   DMA3_INT = DummyFunction;
+   Z80_INT = DummyInterrupt;
+   HBL_INT = DummyInterrupt;
+   TI0_INT = DummyInterrupt;
+   TI1_INT = DummyInterrupt;
+   TI2_INT = DummyInterrupt;
+   TI3_INT = DummyInterrupt;
+   STX_INT = DummyInterrupt;
+   SRX_INT = DummyInterrupt;
+   DMA0_INT = DummyInterrupt;
+   DMA1_INT = DummyInterrupt;
+   DMA2_INT = DummyInterrupt;
+   DMA3_INT = DummyInterrupt;
 
    ENABLE_INTERRUPTS;
    
@@ -110,7 +112,11 @@ void SysShutdown()
    __asm(" ldf 3");
    __asm(" add w,w");
    __asm(" add w,w");
+#ifdef CLANG
+   __asm(" ld xix,0fffe00h");
+#else
    __asm(" ld xix,0xfffe00");
+#endif
    __asm(" ld xix,(xix+w)");
    __asm(" call xix");
 }
@@ -128,7 +134,11 @@ void SysSetSystemFont()
    __asm(" ldf 3");
    __asm(" add w,w");
    __asm(" add w,w");
-   __asm(" ld xix, 0xfffe00");
+#ifdef CLANG
+   __asm(" ld xix,0fffe00h");
+#else
+   __asm(" ld xix,0xfffe00");
+#endif
    __asm(" ld xix,(xix+w)");
    __asm(" call xix");
 }
@@ -136,7 +146,7 @@ void SysSetSystemFont()
 //////////////////////////////////////////////////////////////////////////////
 // ClearScreen
 // Inputs:
-//		Plane - Scroll Plane to clear SCR_1_PLANE or SCR_2_PLANE
+//  Plane - Scroll Plane to clear SCR_1_PLANE or SCR_2_PLANE
 //////////////////////////////////////////////////////////////////////////////
 void ClearScreen(u8 Plane)
 {
@@ -145,25 +155,25 @@ void ClearScreen(u8 Plane)
 
    switch(Plane)
    {
-	  case SCR_1_PLANE:
-		 Screen = SCROLL_PLANE_1;
-		 break;
-	  case SCR_2_PLANE:
-		 Screen = SCROLL_PLANE_2;
-		 break;
-	  default:
-		 return;
+   case SCR_1_PLANE:
+   Screen = SCROLL_PLANE_1;
+   break;
+   case SCR_2_PLANE:
+   Screen = SCROLL_PLANE_2;
+   break;
+   default:
+   return;
    }
 
    for (i = 0; i < 32*32; i ++)
-	  Screen[i] = 0;
+   Screen[i] = 0;
 }
 
 //////////////////////////////////////////////////////////////////////////////
 // SetPalette
 // Inputs:
-//		Plane - Scroll Plane to clear SCR_1_PLANE or SCR_2_PLANE
-//		PalleteNo - 0-15 the palette no to set
+//  Plane - Scroll Plane to clear SCR_1_PLANE or SCR_2_PLANE
+//  PalleteNo - 0-15 the palette no to set
 //      Col0-Col3 - The RGB values for the 4 colours within the palette
 //////////////////////////////////////////////////////////////////////////////
 void SetPalette(u8 Plane, u8 PaletteNo, u16 Col0, u16 Col1, u16 Col2, u16 Col3)
@@ -173,17 +183,17 @@ void SetPalette(u8 Plane, u8 PaletteNo, u16 Col0, u16 Col1, u16 Col2, u16 Col3)
 
    switch (Plane)
    {
-	  case SCR_1_PLANE:
-		 thePalette = SCROLL_1_PALETTE;
-		 break;
-	  case SCR_2_PLANE:
-		 thePalette = SCROLL_2_PALETTE;
-		 break;
+   case SCR_1_PLANE:
+   thePalette = SCROLL_1_PALETTE;
+   break;
+   case SCR_2_PLANE:
+   thePalette = SCROLL_2_PALETTE;
+   break;
       case SPRITE_PLANE:
          thePalette = SPRITE_PALETTE;
          break;
-	  default:
-		 return;
+   default:
+   return;
    }
    
    thePalette[Offset] = Col0;
@@ -196,8 +206,8 @@ void SetPalette(u8 Plane, u8 PaletteNo, u16 Col0, u16 Col1, u16 Col2, u16 Col3)
 //////////////////////////////////////////////////////////////////////////////
 // PutTile
 // Inputs:
-//		Plane - Scroll Plane to clear SCR_1_PLANE or SCR_2_PLANE
-//		PalleteNo - 0-15 the palette number to set
+//  Plane - Scroll Plane to clear SCR_1_PLANE or SCR_2_PLANE
+//  PalleteNo - 0-15 the palette number to set
 //      XPos - X Position (0 to 19)
 //      YPos - Y Position (0 to 18)
 //      TileNo - Tile Number (0 to 511)
@@ -212,14 +222,14 @@ void PutTile(u8 Plane, u8 Palette, u8 XPos, u8 YPos, u16 TileNo)
 
    switch(Plane)
    {
-	  case SCR_1_PLANE:
-		 ScreenPlane1[Offset] = Value;
-		 break;
-	  case SCR_2_PLANE:
-		 ScreenPlane2[Offset] = Value;
-		 break;
-	  default:
-		 break;
+   case SCR_1_PLANE:
+   ScreenPlane1[Offset] = Value;
+   break;
+   case SCR_2_PLANE:
+   ScreenPlane2[Offset] = Value;
+   break;
+   default:
+   break;
    }
 }
 
@@ -227,11 +237,11 @@ void PutTile(u8 Plane, u8 Palette, u8 XPos, u8 YPos, u16 TileNo)
 //////////////////////////////////////////////////////////////////////////////
 // GetTile
 // Inputs:
-//		Plane - Scroll Plane to clear SCR_1_PLANE or SCR_2_PLANE
+//  Plane - Scroll Plane to clear SCR_1_PLANE or SCR_2_PLANE
 //      XPos - X Position (0 to 19)
 //      YPos - Y Position (0 to 18)
 // Outputs:
-//		PalleteNo - 0-15 the palette number to set
+//  PalleteNo - 0-15 the palette number to set
 //      TileNo - Tile Number (0 to 511)
 //////////////////////////////////////////////////////////////////////////////
 void GetTile(u8 Plane, u8 *Palette, u8 XPos, u8 YPos, u16 *TileNo)
@@ -244,15 +254,15 @@ void GetTile(u8 Plane, u8 *Palette, u8 XPos, u8 YPos, u16 *TileNo)
    switch(Plane)
    {
       case SCR_1_PLANE:
-	 *Palette = (u8)(ScreenPlane1[Offset] >> 9);
-	 *TileNo = (ScreenPlane1[Offset] & 511);
-	 break;
+  *Palette = (u8)(ScreenPlane1[Offset] >> 9);
+  *TileNo = (ScreenPlane1[Offset] & 511);
+  break;
       case SCR_2_PLANE:
-	 *Palette = (u8)(ScreenPlane2[Offset] >> 9);
-	 *TileNo = (ScreenPlane2[Offset] & 511);
-	 break;
+  *Palette = (u8)(ScreenPlane2[Offset] >> 9);
+  *TileNo = (ScreenPlane2[Offset] & 511);
+  break;
       default:
-	 break;
+  break;
    }
 }
 
@@ -273,8 +283,8 @@ void Sleep(u8 VBlanks)
 // PrintDecimal
 // Displays a decimal number of the screen padded with leading zeros
 // Inputs:
-//		Plane - Scroll Plane to clear SCR_1_PLANE or SCR_2_PLANE
-//		PalleteNo - 0-15 the palette number to set
+//  Plane - Scroll Plane to clear SCR_1_PLANE or SCR_2_PLANE
+//  PalleteNo - 0-15 the palette number to set
 //      x - X Position (0 to 19)
 //      y - Y Position (0 to 18)
 //      Value - The number to display
@@ -287,8 +297,8 @@ void PrintDecimal(u8 Plane, u8 PaletteNo, u8 x, u8 y, u16 Value, u8 Len)
 
    for (i = Len; i > 0; i--)
    {
-	  PutTile(Plane, PaletteNo, x+i-1, y, '0' + (Value % 10));
-	  Value /= 10;
+   PutTile(Plane, PaletteNo, x+i-1, y, '0' + (Value % 10));
+   Value /= 10;
    }
 }
 
@@ -308,7 +318,7 @@ void InstallTileSet(const unsigned short Tiles[][8], u16 Len)
 
    for (i = 0; i < Len; i ++)
    {
-	  TileRam[i] = *theTiles++;
+   TileRam[i] = *theTiles++;
    }
 }
 
@@ -329,8 +339,8 @@ void SetBackgroundColour(u16 Col)
 // PrintString
 // Displays a string on the screen at the specified location
 // Inputs:
-//		Plane - Scroll Plane to clear SCR_1_PLANE or SCR_2_PLANE
-//		PalleteNo - 0-15 the palette number to set
+//  Plane - Scroll Plane to clear SCR_1_PLANE or SCR_2_PLANE
+//  PalleteNo - 0-15 the palette number to set
 //      XPos - X Position (0 to 19)
 //      YPos - Y Position (0 to 18)
 //      theString - The string to be displayed
@@ -341,26 +351,26 @@ void PrintString(u8 Plane, u8 Palette, u8 XPos, u8 YPos, const char * theString)
 
    switch (Plane)
    {
-	  case SCR_1_PLANE:
-		 Screen = SCROLL_PLANE_1;
-		 break;
+   case SCR_1_PLANE:
+   Screen = SCROLL_PLANE_1;
+   break;
 
-	  case SCR_2_PLANE:
-		 Screen = SCROLL_PLANE_2;
-		 break;
+   case SCR_2_PLANE:
+   Screen = SCROLL_PLANE_2;
+   break;
 
-	  default:
-		 return;
+   default:
+   return;
    }
 
    while (*theString)
    {
-	  u16 Offset = ((u16)YPos * 32) + XPos;
-	  u16 Value = *theString + ((u16)Palette << 9);
-	  Screen[Offset] = Value;
+   u16 Offset = ((u16)YPos * 32) + XPos;
+   u16 Value = *theString + ((u16)Palette << 9);
+   Screen[Offset] = Value;
 
-	  theString++;
-	  XPos++;
+   theString++;
+   XPos++;
    }
 }
 
@@ -371,7 +381,7 @@ void PrintString(u8 Plane, u8 Palette, u8 XPos, u8 YPos, const char * theString)
 // Initialise a sprite by mapping a tile number and sprite palette no
 // to a sprite number and allowing chaining to be set up.
 // Inputs:
-//		SpriteNo - 0-63 the sprite to move
+//  SpriteNo - 0-63 the sprite to move
 //      XPos - X Position (0 to 255)
 //      YPos - Y Position (0 to 255)
 //////////////////////////////////////////////////////////////////////////////
@@ -400,7 +410,7 @@ void SetSprite(u8 SpriteNo, u16 TileNo, u8 Chain, u8 XPos, u8 YPos, u8 PaletteNo
 // SetSpritePosition
 // Moves a already initialise sprite
 // Inputs:
-//		SpriteNo - 0-63 the sprite to move
+//  SpriteNo - 0-63 the sprite to move
 //      XPos - X Position (0 to 255)
 //      YPos - Y Position (0 to 255)
 //////////////////////////////////////////////////////////////////////////////
@@ -546,7 +556,7 @@ void BlockCopy(u8 * Dest, const u8 * Source, u16 n)
    p2 = (u8 *)Source;
    
    while (n--)
-	  *p1++ = *p2++;
+   *p1++ = *p2++;
 }
 
 
@@ -588,22 +598,22 @@ void InstallSounds(const SOUNDEFFECT SoundData[], u8 NumSounds)
    
    for (Preset = 0; Preset < NumSounds; Preset++)
    {
-	   // copy SFX
-	  u8 * SData = (u8 *)&SoundData[Preset];
+    // copy SFX
+   u8 * SData = (u8 *)&SoundData[Preset];
 
-	  // this is yuk but I couldn't find a way to stop the C compiler
-	  // doing word alignment on the SoundEffects structure. This
-	  // removes the excess padding.
-	  BlockCopy(SFXBuff1, SData, 3);
-	  SData+=4;
-	  BlockCopy(SFXBuff2, SData, sizeof(SOUNDEFFECT)-4);
+   // this is yuk but I couldn't find a way to stop the C compiler
+   // doing word alignment on the SoundEffects structure. This
+   // removes the excess padding.
+   BlockCopy(SFXBuff1, SData, 3);
+   SData+=4;
+   BlockCopy(SFXBuff2, SData, sizeof(SOUNDEFFECT)-4);
 
-	  // instruct driver to store it
-	  SFXLoadPreset = Preset+1;
+   // instruct driver to store it
+   SFXLoadPreset = Preset+1;
 
-	   // wait for completion
-	  while(SFXLoadPreset)
-		 ;
+    // wait for completion
+   while(SFXLoadPreset)
+   ;
    }
 }
 
@@ -657,19 +667,23 @@ void SeedRandom(void)
 // the compiler :-0
 s32 Multiply32bit(s32 Value1, s32 Value2)
 {
-   __ASM("  LD      XWA, (XSP+4)");
-   __ASM("  LD      XBC, (XSP+8)");
-   __ASM("  LD		HL,QWA");
-   __ASM("  MUL		XHL,BC");
-   __ASM("  LD		DE,QBC");
-   __ASM("  MUL		XDE,WA");
-   __ASM("  ADD		XHL,XDE");
-   __ASM("  LD		QHL,HL");
-   __ASM("  LD		HL,0");
-   __ASM("  MUL		XWA,BC");
-   __ASM("  ADD		XHL,XWA");
+#ifndef CLANG
+   __asm("  LD  XWA, (XSP+4)");
+   __asm("  LD  XBC, (XSP+8)");
+   __asm("  LD  HL,QWA");
+   __asm("  MUL XHL,BC");
+   __asm("  LD  DE,QBC");
+   __asm("  MUL XDE,WA");
+   __asm("  ADD XHL,XDE");
+   __asm("  LD  QHL,HL");
+   __asm("  LD  HL,0");
+   __asm("  MUL XWA,BC");
+   __asm("  ADD XHL,XWA");
 
    return __XHL;
+#else
+   return Value1 * Value2;
+#endif
 }
 
 //////////////////////////////////////////////////////////////////////////////

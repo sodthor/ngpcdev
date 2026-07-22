@@ -12,6 +12,8 @@
 #define MAIN_X 72
 #define MAIN_Y 72
 
+void memcpy(void *dst, void *src, u16 n);
+
 const u8* map;   // map
 u16 map_w,map_h; // map size
 
@@ -249,7 +251,6 @@ void main()
 		if (a&J_A)
 		{
 			initLevel((curLvl+1)%NB_LEVELS); // switch level
-			initScreen((map_w>>1)-10,(map_h>>1)-9); // center map
 			while (a = JOYPAD); // please, free the button !
 		}
 		// sprite anim :)

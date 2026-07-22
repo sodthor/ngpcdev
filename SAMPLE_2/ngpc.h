@@ -21,6 +21,10 @@ typedef u8 bool;
 
 #define RGB(r,g,b) ((u16)(r)&15) | (((u16)(g)&15)<<4) | (((u16)(b)&15)<<8)
 
+#ifdef CLANG
+#define __interrupt
+#endif
+
 typedef void __interrupt Interrupt();
 typedef void (*FuncPtr)(void);
 
@@ -138,6 +142,7 @@ typedef void (*FuncPtr)(void);
 #define VECT_COMCREATEBUFDATA				// Communication obtain create data buffer BIOS
 #define VECT_COMGETBUFDATA					// Communication write reception obtaining buffer	BIOS
 
+#define DISABLE_INTERRUPTS __asm("di")
 #define ENABLE_INTERRUPTS __asm("ei")
 
 

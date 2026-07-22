@@ -35,4 +35,5 @@ const u16 gfx_pals[GFX_PALS*4]= {
 
 const u8 gfx_palidx[GFX_TILES] = {
 0,1,2,3,4,5,6,7,7,7,7,7,7,7,7,7
+
 };

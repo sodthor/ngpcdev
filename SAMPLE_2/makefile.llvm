@@ -1,0 +1,21 @@
+.SUFFIXES: .c .asm .ll
+NAME = SAMPLE
+
+all: ngpc.lcf gfx.h $(NAME).ngp
+
+LL = main.ll memcpy.ll library.ll levels.ll
+
+$(NAME).asm: $(LL)
+	java -cp ../transpiler Ir2Tlcs900 $(LL) -o $(NAME).asm
+
+$(NAME).ngp: $(NAME).asm
+	wine ./build.bat $(NAME)
+
+.c.ll:
+	clang-18 -S -emit-llvm -DCLANG $<
+
+gfx.h: test.GIF
+	java -cp . CodeSprites test.GIF gfx.h GFX
+
+clean:
+	rm -f *.ll $(NAME).asm $(NAME).p $(NAME).ngp gfx.h

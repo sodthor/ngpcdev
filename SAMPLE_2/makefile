@@ -7,7 +7,7 @@ OBJS = \
 	library.rel \
 	levels.rel
 
-$(NAME).ngp: makefile ngpc.lcf gfx $(OBJS)
+$(NAME).ngp: makefile ngpc.lcf $(OBJS)
 	tulink -la -o $(NAME).abs ngpc.lcf $(OBJS)
 	tuconv -Fs24 $(NAME).abs
 	s242ngp $(NAME).s24
