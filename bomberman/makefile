@@ -2,23 +2,20 @@
 
 NAME = BOMBERMAN
 
-JAVA_HOME=c:\temp\jdk1.4
-JAVA = $(JAVA_HOME)\bin\java
-JAVAC = $(JAVA_HOME)\bin\javac
-
 OBJS = \
-	main.s \
-	hicolor.s \
-	mplayer.s \
-	flash.s \
-	music.s \
-	img.s \
-	library.s
+	main.rel \
+	hicolor.rel \
+	mplayer.rel \
+	flash.rel \
+	music.rel \
+	img.rel \
+	library.rel \
+	ngpc_linkkit/ngpc_linkkit.rel \
+	ngpc_linkkit/ngpc_linkkit_com.rel
 
 FLAGS =	-O3
 
 DATA = \
-	Bin2C.class \
 	cotton0.mh \
 	metalslug0.mh \
 	metalslug1.mh \
@@ -35,14 +32,10 @@ DATA = \
 	magical1.mh \
 	magical2.mh
 
-$(NAME).ngp: makefile mclean ngpc.lcf $(DATA) $(OBJS)
-#	tulink -la -o $(NAME).abs ngpc.lcf $(OBJS)
-#	tuconv -Fs24 $(NAME).abs
-#	s242ngp $(NAME).s24
-#	../../neopop/neopop-win32
-
-.c.s:
-	D:/dev/ngpcdev/llvm-2.9/bin/llvm-gcc -I . -DGCC -emit-llvm -O3 -S $< -o $@
+$(NAME).ngp: makefile ngpc.lcf $(DATA) $(OBJS)
+	tulink -la -o $(NAME).abs ngpc.lcf $(OBJS)
+	tuconv -Fs24 $(NAME).abs
+	s242ngp $(NAME).s24
 
 .c.rel:
 	cc900 -c $(FLAGS) $< -o $@
@@ -56,13 +49,9 @@ $(NAME).ngp: makefile mclean ngpc.lcf $(DATA) $(OBJS)
 .java.class:
 	$(JAVAC) $<
 
-mclean:
-	touch main.rel
-	rm main.rel
-
 clean:
-	rm *.rel
-	rm *.abs
-	rm *.map 
-	rm *.s24 
-	rm $(NAME).ngp
+	del *.rel
+	del *.abs
+	del *.map 
+	del *.s24 
+	del $(NAME).ngp
