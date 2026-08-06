@@ -404,9 +404,9 @@ volatile u32 RAND_RandomData;
 // Call SeedRandom just after the user has pressed fire/start from the
 // title screen of your game.
 //////////////////////////////////////////////////////////////////////////////
-void SeedRandom(void)
+void SeedRandom(u16 seed)
 {
-   RAND_RandomData = VBCounter;
+   RAND_RandomData = seed;
    GetRandom(100);
 }
 

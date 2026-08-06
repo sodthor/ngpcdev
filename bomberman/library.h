@@ -35,7 +35,7 @@ void PrintString(u8 Plane, u8 Palette, u8 XPos, u8 YPos, const char * theString)
 void SetSprite(u8 SpriteNo, u16 TileNo, u8 XPos, u8 YPos, u8 PaletteNo, u8 Ctrl);
 void SetSpritePosition(u8 SpriteNo, u8 XPos, u8 YPos);
 
-void SeedRandom(void);
+void SeedRandom(u16);
 u16 GetRandom(u16 Value);
 
 /*
