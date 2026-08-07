@@ -450,14 +450,16 @@ void setTile16(u16 i,u16 j,u16 k,u8 flag)
 
 void showBoard()
 {
-    u16 i,j;
-    u16 minx = scr_x>>4;
-    u16 miny = scr_y>>4;
+    u16 i,j,minx,miny;
     u16 maxx,maxy;
+
+    scr_x = chars[0].x <= 80 ? 0 : (chars[0].x >= 160 ? 80 : (chars[0].x - 80));
+    scr_y = chars[0].y <= 80 ? 0 : (chars[0].y >= 168 ? 88 : (chars[0].y - 80));
+    minx = scr_x>>4;
+    miny = scr_y>>4;
+
     maxx = MIN(15,minx+12);
     maxy = MIN(15,miny+12);
-    SCR2_X = SCR1_X = scr_x;
-    SCR2_Y = SCR1_Y = scr_y;
     for (i=minx;i<maxx;i++)
     {
         for (j=miny;j<maxy;j++)
@@ -469,6 +471,8 @@ void showBoard()
             }
         }
     }
+    SCR2_X = SCR1_X = scr_x;
+    SCR2_Y = SCR1_Y = scr_y;
 }
 
 void markBomb(u8 x,u8 y,u8 power,u8 dx,s8 dy,s8 dn)
@@ -953,7 +957,7 @@ void checkMap(u8 i)
 
 u16 moveChar(u8 duel)
 {
-    u8 j, i = 1;
+    u8 j, i = 1, cx, cy, f;
     u16 ret = 0;
 
     if (chars[0].alive!=1)
@@ -965,11 +969,14 @@ u16 moveChar(u8 duel)
         chars[0].speed-=1;
 
     j = JOYPAD;
+    cx = chars[0].x&0xf;
+    cy = chars[0].y&0xf;
 
     if ((chars[0].invers==0 && (j&J_DOWN)) || (chars[0].invers && (j&J_UP)) ||
-        ((chars[0].y&0xf) && chars[0].dir==J_DOWN))
+        (cy && chars[0].dir==J_DOWN))
     {
-        if ((chars[0].y&0x0f)||isFree(chars[0].x,chars[0].y,J_DOWN,1,0))
+        f = isFree(chars[0].x,chars[0].y,J_DOWN,1,0);
+        if (cy || f)
         {
             i = 0;
             if (chars[0].dir!=J_DOWN)
@@ -977,15 +984,14 @@ u16 moveChar(u8 duel)
                 chars[0].dir = J_DOWN;
                 chars[0].anim = 0;
             }
-            chars[0].y += chars[0].speed?2:1;
-            if (chars[0].y>80 && chars[0].y<=168)
-                scr_y += chars[0].speed?2:1;
+            chars[0].y += ((cy < 15 || f) && chars[0].speed) ? 2 : 1;
         }
     }
     if ((chars[0].invers==0 && (j&J_LEFT)) || (chars[0].invers && (j&J_RIGHT)) ||
-        ((chars[0].x&0xf) && chars[0].dir==J_LEFT))
+        (cx && chars[0].dir==J_LEFT))
     {
-        if ((chars[0].x&0x0f)||isFree(chars[0].x,chars[0].y,J_LEFT,1,0))
+        f = isFree(chars[0].x,chars[0].y,J_LEFT,1,0);
+        if (cx || f)
         {
             i = 0;
             if (chars[0].dir!=J_LEFT)
@@ -993,15 +999,14 @@ u16 moveChar(u8 duel)
                 chars[0].dir = J_LEFT;
                 chars[0].anim = 0;
             }
-            chars[0].x -= chars[0].speed?2:1;
-            if (chars[0].x>=80 && chars[0].x<160)
-                scr_x -= chars[0].speed?2:1;
+            chars[0].x -= ((cx > 1 || f) && chars[0].speed) ? 2 : 1;
         }
     }
     if ((chars[0].invers==0 && (j&J_UP)) || (chars[0].invers && (j&J_DOWN)) ||
-        ((chars[0].y&0xf) && chars[0].dir==J_UP))
+        (cy && chars[0].dir==J_UP))
     {
-        if ((chars[0].y&0x0f)||isFree(chars[0].x,chars[0].y,J_UP,1,0))
+        u8 f = isFree(chars[0].x,chars[0].y,J_UP,1,0);
+        if (cy || f)
         {
             i = 0;
             if (chars[0].dir!=J_UP)
@@ -1009,15 +1014,14 @@ u16 moveChar(u8 duel)
                 chars[0].dir = J_UP;
                 chars[0].anim = 0;
             }
-            chars[0].y -= chars[0].speed?2:1;
-            if (chars[0].y>=80 && chars[0].y<168)
-                scr_y -= chars[0].speed?2:1;
+            chars[0].y -= ((cy > 1 || f) && chars[0].speed) ? 2 : 1;
         }
     }
     if ((chars[0].invers==0 && (j&J_RIGHT)) || (chars[0].invers && (j&J_LEFT)) ||
-        ((chars[0].x&0xf) && chars[0].dir==J_RIGHT))
+        (cx && chars[0].dir==J_RIGHT))
     {
-        if ((chars[0].x&0x0f)||isFree(chars[0].x,chars[0].y,J_RIGHT,1,0))
+        f = isFree(chars[0].x,chars[0].y,J_RIGHT,1,0);
+        if (cx || f)
         {
             i = 0;
             if (chars[0].dir!=J_RIGHT)
@@ -1025,11 +1029,10 @@ u16 moveChar(u8 duel)
                 chars[0].dir = J_RIGHT;
                 chars[0].anim = 0;
             }
-            chars[0].x += chars[0].speed?2:1;
-            if (chars[0].x>80 && chars[0].x<=160)
-                scr_x += chars[0].speed?2:1;
+            chars[0].x += ((cx < 15 || f) && chars[0].speed) ? 2 : 1;
         }
     }
+
     if (i)
         chars[0].anim = 0;
 
@@ -1806,8 +1809,6 @@ static void duelInitMap(u8 host0)
             curbombs[i][j]= MAX_BOMBS;
             curmark[i][j] = 0;
         }
-    scr_x = host0 ? 0 : 80;
-    scr_y = host0 ? 0 : 80;
     showBoard();
     cntupd  = 1;
     nb_bombs = 0;
