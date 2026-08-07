@@ -1618,7 +1618,7 @@ void __interrupt myVBL()
 u8 menu()
 {
     u16 i = 0,j,k,l;
-    s16 dl = 2;
+    s16 dl = 2, seed = 0;
     u8 x,y;
     loadMenuGfx();
 
@@ -1636,15 +1636,15 @@ u8 menu()
         l += dl;
         if (l==4 || l==0)
             dl = -dl;
-        SetSprite(0,l+k                    ,x  ,y  ,CURSOR_PALIDX1[l],TOP_PRIO);
-        SetSprite(1,l+k+1                ,x+8,y  ,CURSOR_PALIDX1[l+1],TOP_PRIO);
-        SetSprite(2,l+k+CURSOR_WIDTH    ,x  ,y+8,CURSOR_PALIDX1[l+CURSOR_WIDTH],TOP_PRIO);
-        SetSprite(3,l+k+CURSOR_WIDTH+1    ,x+8,y+8,CURSOR_PALIDX1[l+CURSOR_WIDTH+1],TOP_PRIO);
+        SetSprite(0,l+k                ,x  ,y  ,CURSOR_PALIDX1[l],TOP_PRIO);
+        SetSprite(1,l+k+1              ,x+8,y  ,CURSOR_PALIDX1[l+1],TOP_PRIO);
+        SetSprite(2,l+k+CURSOR_WIDTH   ,x  ,y+8,CURSOR_PALIDX1[l+CURSOR_WIDTH],TOP_PRIO);
+        SetSprite(3,l+k+CURSOR_WIDTH+1 ,x+8,y+8,CURSOR_PALIDX1[l+CURSOR_WIDTH+1],TOP_PRIO);
         k+=(CURSOR_TILES>>1);
-        SetSprite(4,l+k                    ,x  ,y  ,CURSOR_NPALS1+CURSOR_PALIDX2[l],TOP_PRIO);
-        SetSprite(5,l+k+1                ,x+8,y  ,CURSOR_NPALS1+CURSOR_PALIDX2[l+1],TOP_PRIO);
-        SetSprite(6,l+k+CURSOR_WIDTH    ,x  ,y+8,CURSOR_NPALS1+CURSOR_PALIDX2[l+CURSOR_WIDTH],TOP_PRIO);
-        SetSprite(7,l+k+CURSOR_WIDTH+1    ,x+8,y+8,CURSOR_NPALS1+CURSOR_PALIDX2[l+CURSOR_WIDTH+1],TOP_PRIO);
+        SetSprite(4,l+k                ,x  ,y  ,CURSOR_NPALS1+CURSOR_PALIDX2[l],TOP_PRIO);
+        SetSprite(5,l+k+1              ,x+8,y  ,CURSOR_NPALS1+CURSOR_PALIDX2[l+1],TOP_PRIO);
+        SetSprite(6,l+k+CURSOR_WIDTH   ,x  ,y+8,CURSOR_NPALS1+CURSOR_PALIDX2[l+CURSOR_WIDTH],TOP_PRIO);
+        SetSprite(7,l+k+CURSOR_WIDTH+1 ,x+8,y+8,CURSOR_NPALS1+CURSOR_PALIDX2[l+CURSOR_WIDTH+1],TOP_PRIO);
 
         j = JOYPAD;
 
@@ -1658,7 +1658,7 @@ u8 menu()
             i+=1;
             SL_PlaySFX(17);
         }
-
+        seed++;
         Sleep(j?8:4);
     }
     while(!(j&J_A));
@@ -1667,6 +1667,7 @@ u8 menu()
     while((j=JOYPAD)&J_A);
     clearPals();
     clearSprites(0);
+    SeedRandom(seed);
     return i;
 }
 
@@ -1696,7 +1697,7 @@ u8 myBuffer[8];
 u8 theirBuffer[8];
 
 u8 initLink() {
-    u8 iLoop, seed0 = VBCounter, seed1;
+    u8 iLoop, seed0 = GetRandom(255) & 0xff, seed1;
     u8 ReadyHost=0;
     u8 ReadyClient=0;
 
@@ -1706,7 +1707,7 @@ u8 initLink() {
     ngpc_linkkit_init();
 
     linkState = ngpc_linkkit_state();
-    
+
     while((!ReadyHost)||(!ReadyClient))
     {
         // Send and receive the joystick state between the two machines
@@ -2034,7 +2035,6 @@ void main()
     while(1)
     {
         showTitle();
-        SeedRandom(VBCounter);
         switch(menu())
         {
             case 0: // Continue
