@@ -91,6 +91,7 @@ u8 scr_x,scr_y;
 u8 lvl;
 u8 lives;
 u8 boss;
+u8 duel;
 u8 chain;
 u16 score;
 
@@ -906,7 +907,7 @@ void checkItem(u8 i,u8 x,u8 y,u8 b)
         default:
             if (item>=16 && item<31)
             {
-                chars[i].alive = (i==0||boss) ? EXPLODE : 16; // explode
+                chars[i].alive = (i==0||boss) ? (duel?0:EXPLODE) : 16; // explode
                 if (i>0 && boss)
                     score += 15;
                 chars[i].anim = 1; // main character anim
@@ -955,7 +956,7 @@ void checkMap(u8 i)
         checkItem(i,x1,y1,b);
 }
 
-u16 moveChar(u8 duel)
+u16 moveChar()
 {
     u8 j, i = 1, cx, cy, f;
     u16 ret = 0;
@@ -1454,6 +1455,7 @@ void game()
 
     lives = 3;
     score = 0;
+    duel = 0;
     while (lives && lvl<NB_MAPS)
     {
         playNextTune();
@@ -1473,7 +1475,7 @@ void game()
         while(chars[0].alive && door && (boss || mn<4))
         {
             updateBoard();
-            moveChar(0);
+            moveChar();
             moveEnemy();
             mngBombs();
             Sleep(1);
@@ -1857,10 +1859,10 @@ static void duelInitChars(u8 host0)
         chars[i].alive = 0;
 }
 
-void duel()
+void duelGame()
 {
 
-    /* Per-session bomb-sequence state (owned by duel()). */
+    /* Per-session bomb-sequence state (owned by duelGame()). */
     u8 myBombSeq = 0;          /* incremented each time the local player drops a bomb */
     u8 myBombXY = 0;           /* tile coords of the local player's last bomb         */
     u8 myBombPow = 0;          /* power of the local player's last bomb               */
@@ -1871,6 +1873,7 @@ void duel()
 
     lvl = 0;
     boss = 1;
+    duel = 1;
     score = 0;
     chain = 0;
 
@@ -1886,7 +1889,7 @@ void duel()
     while (1)
     {
         /* ---- local input & movement ---- */
-        u16 bb = moveChar(1);
+        u16 bb = moveChar();
         if (bb) {
             /* latch this bomb so it keeps being advertised until the
              * peer acknowledges it by seq change; survives packet loss */
@@ -1899,7 +1902,7 @@ void duel()
         myBuffer[0] = LINK_GAME;
         myBuffer[1] = chars[0].x;
         myBuffer[2] = chars[0].y;
-        myBuffer[3] = (chars[0].alive ? 0x80 : 0) | chars[0].dir;
+        myBuffer[3] = (chars[0].alive == 1 ? 0x80 : 0) | chars[0].dir;
         myBuffer[4] = (chars[0].anim << 4) | chars[0].count;
         myBuffer[5] = myBombSeq;
         myBuffer[6] = myBombXY;
@@ -1916,10 +1919,12 @@ void duel()
                 u8 rSeq = theirBuffer[5];
 
                 /* the remote console decides its own death */
-                if ((theirBuffer[3] & 0x80) == 0)
+                if ((theirBuffer[3] & 0x80) == 0) {
                     chars[1].alive = 0;
+                    break;
+                }
                 /* remote position is authoritative while it is alive */
-                if (chars[1].alive)
+                if (chars[1].alive != 0)
                 {
                     chars[1].x   = theirBuffer[1];
                     chars[1].y   = theirBuffer[2];
@@ -1957,11 +1962,12 @@ void duel()
         /* ---- render ---- */
         Sleep(1);
         showBoard();
+
+        if (chars[0].alive != 1)
+            break;
+
         setMainSprite(0, 0, 0);
         setMainSprite(12, 1, 1);
-
-        if (!chars[0].alive || !chars[1].alive)
-            break;
 
         /* ---- link lost check ---- */
         newLinkState = ngpc_linkkit_state();
@@ -1985,7 +1991,7 @@ void duel()
     }
 
     clearSprites(0);
-    if (chars[1].alive)
+    if (chars[0].alive != 1)
         youLose(" YOU", "LOSE!");
     else
         youWin();
@@ -2033,7 +2039,7 @@ void main()
                 break;
             case 3: // 2 players game
                 if (initLink()) {
-                    duel();
+                    duelGame();
                 }
                 break;
         }
