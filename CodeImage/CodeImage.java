@@ -9,6 +9,7 @@ import java.awt.GridLayout;
 import java.awt.Image;
 import java.awt.MediaTracker;
 import java.awt.Panel;
+import java.awt.RenderingHints;
 import java.awt.Toolkit;
 import java.awt.Window;
 import java.awt.event.ActionEvent;
@@ -25,7 +26,7 @@ import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Arrays;
-
+import java.util.List;
 import javax.imageio.ImageIO;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
@@ -34,15 +35,19 @@ import javax.swing.JComboBox;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.JSlider;
 import javax.swing.JTextField;
 import javax.swing.SwingConstants;
 import javax.swing.WindowConstants;
+import javax.swing.event.ChangeEvent;
+import javax.swing.event.ChangeListener;
+import java.util.Hashtable;
 import javax.swing.border.LineBorder;
 
-import sun.awt.image.ToolkitImage;
-
-public class CodeImage extends JFrame implements ActionListener,ItemListener
+public class CodeImage extends JFrame implements ActionListener,ItemListener,ChangeListener
 {
+	private static final long serialVersionUID = 1L;
+
 	public static final int ASM  = 0;
 	public static final int C    = 1;
 	public static final int DATA = 2;
@@ -51,6 +56,49 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 
 	public static final int PSIZE = 4;
 	public static final int U = 500;
+
+	// Bayer 4x4 ordered-dither matrix (values 0..15) used to reduce banding
+	// when quantizing to the NGPC 4-bit-per-channel color space.
+	private static final int[][] BAYER4 = {
+		{  0,  8,  2, 10 },
+		{ 12,  4, 14,  6 },
+		{  3, 11,  1,  9 },
+		{ 15,  7, 13,  5 }
+	};
+
+	/**
+	 * Apply ordered (Bayer 4x4) dithering toward the NGPC 4-bit-per-channel grid.
+	 * Each channel is nudged across quantization boundaries so that the later
+	 * truncation in RGB.updateNGP()/rgb() produces a dithered pattern instead of
+	 * hard color banding. Background pixels are left untouched.
+	 */
+	public static void applyDither(BufferedImage bi)
+	{
+		int w = bi.getWidth();
+		int h = bi.getHeight();
+		int bg = BACKGROUND.value & 0xffffff;
+		// one NGPC level spans 0x11 (17) in 8-bit space; spread half a level around it
+		final double step = 17.0;
+		for (int y=0;y<h;y++)
+		{
+			for (int x=0;x<w;x++)
+			{
+				int argb = bi.getRGB(x,y);
+				if ((argb & 0xffffff) == bg)
+					continue;
+				double t = (BAYER4[y&3][x&3] / 16.0) - 0.5; // -0.5 .. +0.4375
+				int r = clamp8((int)Math.round(((argb>>16)&0xff) + t*step));
+				int g = clamp8((int)Math.round(((argb>>8)&0xff)  + t*step));
+				int b = clamp8((int)Math.round((argb&0xff)       + t*step));
+				bi.setRGB(x,y,(argb & 0xff000000) | (r<<16) | (g<<8) | b);
+			}
+		}
+	}
+
+	private static int clamp8(int v)
+	{
+		return v<0?0:(v>255?255:v);
+	}
 	
 	public static final String bals[] = {"cm","cd","cl","wm","wd","wl"};
 	
@@ -68,10 +116,10 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 	/**
 	 * Transform an image to multiple 8x8 tiles
 	 * @param img image to transform
-	 * @param v   ArrayList containing all tiles
+	 * @param v   List containing all tiles
 	 * @return the number of tiles/line
 	 */
-	public static int doTiles(Image img,ArrayList v)
+	public static int doTiles(Image img,List<int[]> v)
 	{
 		MediaTracker tracker = new MediaTracker(new Panel());
 		tracker.addImage(img, 0);
@@ -124,12 +172,12 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 	public static void doPals(Encoding enc,int balance)
 	{
 		int k;
-		ArrayList v = new ArrayList();
-		ArrayList w = new ArrayList();
+		List<Int> v = new ArrayList<>();
+		List<Int> w = new ArrayList<>();
 		
 		for (int i=0;i<enc.imgs0.size();i++)
 		{
-			int pix0[] = (int[])enc.imgs0.get(i);
+			int pix0[] = enc.imgs0.get(i);
 			int pix1[], l = pix0.length;
 			if (balance>=0)
 			{
@@ -146,7 +194,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 					w.add(new Int(1));
 				}
 				else
-					((Int)w.get(k)).value += 1;
+					w.get(k).value += 1;
 			}
 		}
 		int[] colors = new int[v.size()];
@@ -156,19 +204,19 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		RGB col = new RGB(0);
 		for (int i=0;i<colors.length;i++)
 		{
-			col.setRGB(((Int)v.get(i)).value);
+			col.setRGB(v.get(i).value);
 			colors[i] = col.red+col.green+col.blue;
 			a[i] = i;
 		}
 
 		qsort(a,c,b,colors,0,colors.length);
 		
-		ArrayList vv = new ArrayList(colors.length);
+		List<Int> vv = new ArrayList<>(colors.length);
 		int[] ww = new int[colors.length];
 		for (int i=0;i<colors.length;i++)
 		{
-			vv.add((Int)v.get(b[i]));
-			ww[i] = (i>0?ww[i-1]:0) + ((Int)w.get(b[i])).value;
+			vv.add(v.get(b[i]));
+			ww[i] = (i>0?ww[i-1]:0) + w.get(b[i]).value;
 		}
 		int lim = 0;
 		if (balance<0) // One plane : no balance
@@ -201,30 +249,32 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		
 		for (int i=0;i<enc.imgs0.size();i++)
 		{
-			ArrayList pal0 = new ArrayList();
-			ArrayList weight0 = new ArrayList();
-			ArrayList pal1 = null,weight1 = null;
+			List<RGB> pal0 = new ArrayList<>();
+			List<Int> weight0 = new ArrayList<>();
+			List<RGB> pal1 = null;
+			List<Int> weight1 = null;
 			
 			enc.palIdx0.add(new Int(i));
 			enc.pals0.add(pal0);
 			enc.weights0.add(weight0);
 			pal0.add(BACKGROUND);
 			weight0.add(new Int(0));
-			pix0 = (int[])enc.imgs0.get(i);
+			pix0 = enc.imgs0.get(i);
 			
 			if (balance>=0)
 			{
-				pal1 = new ArrayList();
-				weight1 = new ArrayList();
+				pal1 = new ArrayList<>();
+				weight1 = new ArrayList<>();
 				enc.palIdx1.add(new Int(i));
 				enc.pals1.add(pal1);
 				enc.weights1.add(weight1);
 				pal1.add(BACKGROUND);
 				weight1.add(new Int(0));
-				pix1 = (int[])enc.imgs1.get(i);
+				pix1 = enc.imgs1.get(i);
 			}
 			
-			ArrayList pal,weight;
+			List<RGB> pal;
+			List<Int> weight;
 			int[] pixa,pixb;
 			
 			for (int j=0;j<pix0.length;j++)
@@ -255,7 +305,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 				}
 				else
 				{
-					((Int)weight.get(k)).value+=1;
+					weight.get(k).value+=1;
 					pixa[j] = k;
 					if (pixb!=null)
 						pixb[j] = 0;
@@ -267,11 +317,11 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 	/**
 	 * Replace a color by an other one in all affected tiles
 	 */
-	public static void replaceCol(ArrayList pal,ArrayList weight,ArrayList imgs,int a,int b,boolean update)
+	public static void replaceCol(List<RGB> pal,List<Int> weight,List<int[]> imgs,int a,int b,boolean update)
 	{
 		for (int k=0;k<imgs.size();k++)
 		{
-			int[] img = (int[])imgs.get(k);
+			int[] img = imgs.get(k);
 			for (int i=0;i<img.length;i++)
 			{
 				if (img[i]==b)
@@ -283,7 +333,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		if (update)
 		{
 			pal.remove(b);
-			((Int)weight.get(a)).value+=((Int)weight.get(b)).value;
+			weight.get(a).value += weight.get(b).value;
 			weight.remove(b);
 		}
 	}
@@ -291,7 +341,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 	/**
 	 * Replace a double colors in a palette
 	 */
-	public static void removeDblColor(ArrayList pal,ArrayList weight,ArrayList imgs)
+	public static void removeDblColor(List<RGB> pal,List<Int> weight,List<int[]> imgs)
 	{
 		for (int i=0;i<pal.size();i++)
 		{
@@ -309,7 +359,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 	/**
 	 * Reduce the number of colors in a palette (and color dithering on tiles)
 	 */
-	public static void reducePal(ArrayList pal,ArrayList weight,ArrayList imgs,int V,int pass)
+	public static void reducePal(List<RGB> pal,List<Int> weight,List<int[]> imgs,int V,int pass)
 	{
 		Int a = new Int(0), b = new Int(0);
 		while (pal.size()>PSIZE)
@@ -319,9 +369,9 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 			// compute average color
 			if (a.value>0)
 			{
-				int wa = ((Int)weight.get(a.value)).value;
-				int wb = ((Int)weight.get(b.value)).value;
-				((RGB)pal.get(a.value)).merge((RGB)pal.get(b.value),wa,wb,U,V);
+				int wa = weight.get(a.value).value;
+				int wb = weight.get(b.value).value;
+				pal.get(a.value).merge(pal.get(b.value),wa,wb,U,V);
 			}
 			replaceCol(pal,weight,imgs,a.value,b.value,true);
 		}
@@ -331,12 +381,12 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 	/**
 	 * Replace palette indices in tiles
 	 */
-	private static void replaceIdx(ArrayList pals,ArrayList palIdx,ArrayList weights,int i,int j)
+	private static void replaceIdx(List<List<RGB>> pals,List<Int> palIdx,List<List<Int>> weights,int i,int j)
 	{
 		int l = palIdx.size();
 		for (int k=i+1;k<l;k++)
 		{
-			Int ii = (Int)palIdx.get(k);
+			Int ii = palIdx.get(k);
 			if (ii.value==j)
 				ii.value = i;
 			if (ii.value>j)
@@ -349,18 +399,18 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 	/**
 	 * Merge 2 palettes and update tiles
 	 */
-	public static void mergePal(ArrayList imgs,ArrayList pals,ArrayList palIdx,ArrayList weights,int a,int b,int V,int pass)
+	public static void mergePal(List<int[]> imgs,List<List<RGB>> pals,List<Int> palIdx,List<List<Int>> weights,int a,int b,int V,int pass)
 	{
-		ArrayList p0 = (ArrayList)pals.get(a);
-		ArrayList p1 = (ArrayList)pals.get(b);
-		ArrayList w0 = (ArrayList)weights.get(a);
-		ArrayList w1 = (ArrayList)weights.get(b);
-		ArrayList iv = new ArrayList();
-		ArrayList iv1 = new ArrayList();
+		List<RGB> p0 = pals.get(a);
+		List<RGB> p1 = pals.get(b);
+		List<Int> w0 = weights.get(a);
+		List<Int> w1 = weights.get(b);
+		List<int[]> iv = new ArrayList<>();
+		List<int[]> iv1 = new ArrayList<>();
 		for (int i=0;i<imgs.size();i++)
 		{
-			int j = ((Int)palIdx.get(i)).value;
-			int[] img = (int[])imgs.get(i);
+			int j = palIdx.get(i).value;
+			int[] img = imgs.get(i);
 			if (j==b)
 			{
 				iv1.add(img);
@@ -380,7 +430,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 				w0.add(w1.get(i));
 			}
 			else
-				((Int)w0.get(j)).value += ((Int)w1.get(i)).value;
+				w0.get(j).value += w1.get(i).value;
 			replaceCol(null,null,iv1,j,i+16,false);
 		}
 		reducePal(p0,w0,iv,V,pass);
@@ -390,7 +440,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 	/**
 	 * Add 2 palettes
 	 */
-	public static void addPal(ArrayList p0,ArrayList p1,ArrayList w0,ArrayList w1)
+	public static void addPal(List<RGB> p0,List<RGB> p1,List<Int> w0,List<Int> w1)
 	{
 		int l = p1.size(),j;
 		for (int i=0;i<l;i++)
@@ -401,14 +451,14 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 				w0.add(w1.get(i));
 			}
 			else
-				((Int)w0.get(j)).value += ((Int)w1.get(i)).value;
+				w0.get(j).value += w1.get(i).value;
 		}
 	}
 	
 	/**
 	 * Find the nearest color according to rgb and weight
 	 */
-	public static long nearestColor(ArrayList p,ArrayList w,Int a,Int b,int V,int start)
+	public static long nearestColor(List<RGB> p, List<Int> w,Int a,Int b,int V,int start)
 	{
 		long d = Long.MAX_VALUE,dj;
 		RGB ci,c = new RGB(0),cj;
@@ -416,12 +466,12 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		for (int i=1;i<l-1;i++)
 		{
 			// find nearest color
-			ci = (RGB)p.get(i);
-			wi = ((Int)w.get(i)).value;
+			ci = p.get(i);
+			wi = w.get(i).value;
 			for (int j=i+1;j<l;j++)
 			{
-				cj = (RGB)p.get(j);
-				wj = ((Int)w.get(j)).value;
+				cj = p.get(j);
+				wj = w.get(j).value;
 				c.setRGB(ci.value);
 				c.merge(cj,wi,wj,U,V);
 				dj = c.dist(ci)*wi+c.dist(cj)*wj;
@@ -436,7 +486,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		return d;
 	}
 
-	public static boolean samePals(ArrayList p0,ArrayList p1) {
+	public static boolean samePals(List<RGB> p0,List<RGB> p1) {
 		int n = 0;
 		int l = p0.size();
 		for (int i = 0; i < l; ++i)
@@ -459,16 +509,16 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 	/**
 	 * Compute the distance between 2 palettes
 	 */
-	public static long dist(ArrayList p0,ArrayList p1,ArrayList w0,ArrayList w1,int V,int pass)
+	public static long dist(List<RGB> p0,List<RGB> p1,List<Int> w0,List<Int> w1,int V,int pass)
 	{
 		if (samePals(p0, p1)) {
 			return 0;
 		}
-		ArrayList p = (ArrayList)p0.clone();
+		List<RGB> p = new ArrayList<>(p0);
 		int l = w0.size();
-		ArrayList w = new ArrayList(l);
+		List<Int> w = new ArrayList<>(l);
 		for (int i=0;i<l;i++)
-			w.add(new Int(((Int)w0.get(i)).value));
+			w.add(new Int(w0.get(i).value));
 		addPal(p,p1,w,w1);
 		long v=0;
 		Int a = new Int(0);
@@ -476,10 +526,10 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		while (p.size()>PSIZE)
 		{
 			nearestColor(p,w,a,b,V,1);
-			RGB cb = (RGB) p.get(b.value);
-			RGB ca = (RGB) p.get(a.value);
-			int wb = ((Int) w.get(b.value)).value;
-			int wa = ((Int) w.get(a.value)).value;
+			RGB cb = p.get(b.value);
+			RGB ca = p.get(a.value);
+			int wb = w.get(b.value).value;
+			int wa = w.get(a.value).value;
 			p.remove(b.value);
 			w.remove(b.value);
 			if (a.value > 0) {
@@ -489,13 +539,13 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 				c.merge(cb, wa, wb, U, V);
 				int pos = p.indexOf(c);
 				if (pos > 0) {
-					((Int) w.get(pos)).value += wa + wb;
+					w.get(pos).value += wa + wb;
 				} else {
 					p.add(c);
 					w.add(new Int(wa+wb));
 				}
 			} else {
-				((Int) w.get(0)).value += wb;
+				w.get(0).value += wb;
 			}
 		}
 		v += dist(p0, w0, V, p, w);
@@ -503,18 +553,18 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		return v;
 	}
 
-	public static long dist(ArrayList p0, ArrayList w0, int V, ArrayList p, ArrayList w) {
+	public static long dist(List<RGB> p0, List<Int> w0, int V, List<RGB> p, List<Int> w) {
 		RGB c = new RGB(0);
 		long ret = 0;
 		for (int i = 1; i < p0.size(); ++i) {
 			// find nearest color
-			RGB ci = (RGB)p0.get(i);
-			int wi = ((Int)w0.get(i)).value;
+			RGB ci = p0.get(i);
+			int wi = w0.get(i).value;
 			long d = Integer.MAX_VALUE;
 			for (int j=1;j<p.size();j++)
 			{
-				RGB cj = (RGB)p.get(j);
-				int wj = ((Int)w.get(j)).value;
+				RGB cj = p.get(j);
+				int wj = w.get(j).value;
 				c.setRGB(ci.value);
 				c.merge(cj,wi,wj,U,V);
 				long dj = c.dist(ci)*wi+c.dist(cj)*wj;
@@ -531,14 +581,14 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 	/**
 	 * Compute a plane from source to ngpc
 	 */
-	public static void doPlane(ArrayList imgs,ArrayList pals,ArrayList palIdx,ArrayList weights,CodeImage frame,int pass,int V,Int cont,int psize)
+	public static void doPlane(List<int[]> imgs,List<List<RGB>> pals,List<Int> palIdx,List<List<Int>> weights,CodeImage frame,int pass,int V,Int cont,int psize)
 	{
-		ArrayList vi = new ArrayList(1);
+		List<int[]> vi = new ArrayList<>(1);
 		
 		for (int i=0;i<pals.size();i++)
 		{
 			vi.add(imgs.get(i));
-			reducePal((ArrayList)pals.get(i),(ArrayList)weights.get(i),vi,V,pass);
+			reducePal(pals.get(i),weights.get(i),vi,V,pass);
 			vi.remove(0);
 		}
 
@@ -547,12 +597,12 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		int[][] dists = new int[l0][l0];
 		for (int i=0;i<l0;i++)
 		{
-			ArrayList pi = (ArrayList)pals.get(i);
-			ArrayList wi = (ArrayList)weights.get(i);
+			List<RGB> pi = pals.get(i);
+			List<Int> wi = weights.get(i);
 			for (int j=i+1;j<l0;j++)
 			{
-				ArrayList pj = (ArrayList)pals.get(j);
-				ArrayList wj = (ArrayList)weights.get(j);
+				List<RGB> pj = pals.get(j);
+				List<Int> wj = weights.get(j);
 				dists[i][j] = dists[j][i] = (int) dist(pi,pj,wi,wj,V,pass);
 			}
 		}
@@ -586,37 +636,37 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 					dists[i][j-1] = dists[i][j];
 			for (int i=b+1;i<l;i++)
 				System.arraycopy(dists[i],0,dists[i-1],0,l-1);
-			ArrayList pa = (ArrayList)pals.get(a);
-			ArrayList wa = (ArrayList)weights.get(a);
+			List<RGB> pa = pals.get(a);
+			List<Int> wa = weights.get(a);
 			for (int i=0;i<l-1;i++)
 			{
 				if (i!=a)
-					dists[i][a] = dists[a][i] = (int) dist((ArrayList)pals.get(i),pa,(ArrayList)weights.get(i),wa,V,pass);
+					dists[i][a] = dists[a][i] = (int) dist(pals.get(i),pa,weights.get(i),wa,V,pass);
 			}
 		}
 	}
 	
 	private static class Encoding
 	{
-		ArrayList imgs0    = new ArrayList();
-		ArrayList pals0    = new ArrayList();
-		ArrayList palIdx0  = new ArrayList();
-		ArrayList weights0 = new ArrayList();
-		ArrayList imgs1    = new ArrayList();
-		ArrayList pals1    = new ArrayList();
-		ArrayList palIdx1  = new ArrayList();
-		ArrayList weights1 = new ArrayList();
+		List<int[]> imgs0    = new ArrayList<>();
+		List<List<RGB>> pals0    = new ArrayList<>();
+		List<Int> palIdx0  = new ArrayList<>();
+		List<List<Int>> weights0 = new ArrayList<>();
+		List<int[]> imgs1    = new ArrayList<>();
+		List<List<RGB>> pals1    = new ArrayList<>();
+		List<Int> palIdx1  = new ArrayList<>();
+		List<List<Int>> weights1 = new ArrayList<>();
 	}
 	
 	/**
 	 * Encode an image to ngpc .hh or .inc format (main procedure)
 	 */
-	public static void encode(String name,String id,int contrast,int planes,int balance,int nbpals,Int nbcol,Int diff,JButton orig,JButton ngpc,CodeImage frame,OutputStream out,Int cont,int otype,boolean force,boolean reduce,boolean flip,boolean resize) throws Exception
+	public static void encode(String name,String id,int contrast,int planes,int balance,int nbpals,Int nbcol,Int diff,JButton orig,JButton ngpc,CodeImage frame,OutputStream out,Int cont,int otype,boolean force,boolean reduce,boolean flip,boolean resize,boolean dither,int fuzz) throws Exception
 	{
-		encode(loadImage(name),id,contrast,planes,balance,nbpals,nbcol,diff,orig,ngpc,frame,out,cont,otype,force,reduce,flip, resize);
+		encode(loadImage(name),id,contrast,planes,balance,nbpals,nbcol,diff,orig,ngpc,frame,out,cont,otype,force,reduce,flip, resize,dither,fuzz);
 	}
 	
-	public static void encode(Image image,String id,int contrast,int planes,int balance,int nbpals,Int nbcol,Int diff,JButton orig,JButton ngpc,CodeImage frame,OutputStream out,Int cont,int otype,boolean force,boolean reduce,boolean flip,boolean resize) throws Exception
+	public static void encode(Image image,String id,int contrast,int planes,int balance,int nbpals,Int nbcol,Int diff,JButton orig,JButton ngpc,CodeImage frame,OutputStream out,Int cont,int otype,boolean force,boolean reduce,boolean flip,boolean resize,boolean dither,int fuzz) throws Exception
 	{
 		int wi = image.getWidth(null);
 		int hi = image.getHeight(null);
@@ -651,6 +701,19 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 			hi = bh;
 		}
 
+		// Ensure we have a BufferedImage to (optionally) dither before tiling.
+		BufferedImage src;
+		if (image instanceof BufferedImage)
+			src = (BufferedImage)image;
+		else
+		{
+			src = new BufferedImage(wi,hi,BufferedImage.TYPE_INT_ARGB);
+			src.getGraphics().drawImage(image,0,0,null);
+			image = src;
+		}
+		if (dither)
+			applyDither(src); // Bayer 4x4 ordered dithering toward NGPC 4-bit space
+
 		Encoding enc = new Encoding();
 
 		int line = doTiles(image,enc.imgs0);
@@ -668,7 +731,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		if (frame!=null)
 			frame.setProgress("Generating...");
 
-		generateOut(id,enc,line,h,planes,out,out,out,otype,force,reduce,flip);
+		generateOut(id,enc,line,h,planes,out,out,out,otype,force,reduce,flip,fuzz);
 
 		if (frame!=null)
 			frame.setProgress("");
@@ -676,7 +739,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		BufferedImage bi = new BufferedImage(wi,hi,BufferedImage.TYPE_INT_ARGB);
 		bi.getGraphics().drawImage(image,0,0,null);
 
-		showResult(enc,line,h,planes,nbpals,nbcol,diff,orig,ngpc,frame,bi);
+		showResult(enc,line,h,planes,nbpals,nbcol,diff,orig,ngpc,frame,bi,reduce,flip,fuzz);
 	}
 	
 	/**
@@ -715,7 +778,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 	/**
 	 * Generate output data (ASM/C/BIN)
 	 */
-	private static void generateOut(String id,Encoding enc,int line,int h,int planes,OutputStream out,OutputStream out1,OutputStream out2,int otype,boolean force,boolean reduce, boolean flip) throws Exception
+	private static void generateOut(String id,Encoding enc,int line,int h,int planes,OutputStream out,OutputStream out1,OutputStream out2,int otype,boolean force,boolean reduce, boolean flip,int fuzz) throws Exception
 	{
 		String name = id;
 		PrintWriter pw = null,pw1 = null,pw2 = null;
@@ -727,18 +790,18 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 			pw2 = id==null&&out2!=null?new PrintWriter(out2):pw;
 		}
 		
-		ArrayList<int[]> tiles = null;
+		List<int[]> tiles = null;
 		int emptyId = -1;
 		if (reduce) {
-			tiles = new ArrayList<int[]>();
+			tiles = new ArrayList<>();
 			if (!flip) {
 				tiles.add(new int[64]); // add empty tile at 0
 				emptyId = 0;
 			}
 			for (int i=0;i<enc.imgs0.size();i++)
 			{
-				int[] img = (int[])enc.imgs0.get(i);
-				if (index(tiles, img) < 0)
+				int[] img = enc.imgs0.get(i);
+				if (index(tiles, img, fuzz) < 0)
 				{
 					tiles.add(img);
 					if (flip)
@@ -762,8 +825,8 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 			{
 				for (int i=0;i<enc.imgs1.size();i++)
 				{
-					int[] img = (int[])enc.imgs1.get(i);
-					if (index(tiles, img) < 0)
+					int[] img = enc.imgs1.get(i);
+					if (index(tiles, img, fuzz) < 0)
 					{
 						tiles.add(img);
 						if (flip)
@@ -857,7 +920,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		{
 			for (int i=0;i<enc.imgs0.size();i++)
 			{
-				int[] img = (int[])enc.imgs0.get(i);
+				int[] img = enc.imgs0.get(i);
 				if (otype!=DATA)
 					pw.print(linewPref);
 				for (int j=0;j<8;j++)
@@ -894,7 +957,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 					pw1.println((otype==ASM?";":"//")+" Line "+h);
 				for (int i=0;i<enc.imgs1.size();i++)
 				{
-					int[] img = (int[])enc.imgs1.get(i);
+					int[] img = enc.imgs1.get(i);
 					pw1.print(linewPref);
 					for (int j=0;j<8;j++)
 					{
@@ -952,8 +1015,8 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 			}
 			for (int i=0;i<l;i++)
 			{
-				int[] img = (int[])enc.imgs0.get(i);
-				int idx = index(tiles, img);
+				int[] img = enc.imgs0.get(i);
+				int idx = index(tiles, img, fuzz);
 				if (i%line == 0) {
 					pw.print(otype==ASM?linewPref:"");
 				}
@@ -984,8 +1047,8 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 				}
 				for (int i=0;i<l;i++)
 				{
-					int[] img = (int[])enc.imgs1.get(i);
-					int idx = index(tiles, img);
+					int[] img = enc.imgs1.get(i);
+					int idx = index(tiles, img, fuzz);
 					if ((i%line) == 0) {
 						pw.print(otype==ASM?linewPref:"");
 					}
@@ -1018,8 +1081,8 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 				}
 				for (int i=0;i<l;i++)
 				{
-					int[] img = (int[])enc.imgs0.get(i);
-					int idx = index(tiles, img);
+					int[] img = enc.imgs0.get(i);
+					int idx = index(tiles, img, fuzz);
 					if (i%line == 0) {
 						pw.print(otype==ASM?linewPref:"");
 					}
@@ -1047,8 +1110,8 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 					}
 					for (int i=0;i<l;i++)
 					{
-						int[] img = (int[])enc.imgs1.get(i);
-						int idx = index(tiles, img);
+						int[] img = enc.imgs1.get(i);
+						int idx = index(tiles, img, fuzz);
 						if ((i%line) == 0) {
 							pw.print(otype==ASM?linewPref:"");
 						}
@@ -1079,12 +1142,12 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		
 		for (int i=0;i<enc.pals0.size();i++)
 		{
-			ArrayList pal = (ArrayList)enc.pals0.get(i);
+			List<RGB> pal = enc.pals0.get(i);
 			if (otype!=DATA)
 				pw1.print(linewPref);
 			for (int j=0;j<4;j++)
 			{
-				int v = j<pal.size()?((RGB)pal.get(j)).ngp:0;
+				int v = j<pal.size()?pal.get(j).ngp:0;
 				if (otype!=DATA)
 				{
 					String tsep = otype==ASM?(j<3?",":""):((id==null||j<3||i<enc.pals0.size()-1)?",":"");
@@ -1114,11 +1177,11 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 			}
 			for (int i=0;i<enc.pals1.size();i++)
 			{
-				ArrayList pal = (ArrayList)enc.pals1.get(i);
+				List<RGB> pal = enc.pals1.get(i);
 				pw1.print(linewPref);
 				for (int j=0;j<4;j++)
 				{
-					int v = j<pal.size()?((RGB)pal.get(j)).ngp:0;
+					int v = j<pal.size()?pal.get(j).ngp:0;
 					String tsep = otype==ASM?(j<3?",":""):((id==null||j<3||i<enc.pals1.size()-1)?",":"");
 					pw1.print(hexPref+int2Hex(v,4)+hexSuf+tsep);
 				}
@@ -1149,7 +1212,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 					pw2.print(linebPref);
 				String lsep = ((i+1)%ii>0?"":"\n");
 				String tsep = ((id==null&&(h<18||planes>1))||i<enc.imgs0.size()-1)&&((otype!=ASM)||((i+1)%ii>0))?",":"";
-				int a = ((Int)enc.palIdx0.get(i)).value;
+				int a = enc.palIdx0.get(i).value;
 				if (id!=null)
 					pw2.print(hexPref+int2Hex(a,2)+hexSuf+tsep+lsep);
 				else
@@ -1193,7 +1256,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 					pw2.print(linebPref);
 				String lsep = ((i+1)%ii>0?"":"\n");
 				String tsep = ((id==null&&h<18)||i<enc.imgs1.size()-1)&&((otype!=ASM)||((i+1)%ii>0))?",":"";
-				int a = ((Int)enc.palIdx1.get(i)).value;
+				int a = enc.palIdx1.get(i).value;
 				if (id!=null)
 					pw2.print(hexPref+int2Hex(a,2)+hexSuf+tsep+lsep);
 				else
@@ -1264,15 +1327,15 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 	/**
 	 *
 	 */
-	private static void showResult(Encoding enc,int line,int h,int planes,int nbpal,Int nbcol,Int diff,JButton orig,JButton ngpc,CodeImage frame,BufferedImage bi)
+	private static void showResult(Encoding enc,int line,int h,int planes,int nbpal,Int nbcol,Int diff,JButton orig,JButton ngpc,CodeImage frame,BufferedImage bi,boolean reduce,boolean flip,int fuzz)
 	{
-		ArrayList v = new ArrayList();
+		List<Integer> v = new ArrayList<>();
 		for (int i=0;i<enc.pals0.size();i++)
 		{
-			ArrayList pal = (ArrayList)enc.pals0.get(i);
+			List<RGB> pal = enc.pals0.get(i);
 			for (int j=0;j<pal.size();j++)
 			{
-				Integer irgb = new Integer(((RGB)pal.get(j)).ngp);
+				Integer irgb = Integer.valueOf(pal.get(j).ngp);
 				if (!v.contains(irgb))
 					v.add(irgb);
 			}
@@ -1281,10 +1344,10 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		{
 			for (int i=0;i<enc.pals1.size();i++)
 			{
-				ArrayList pal = (ArrayList)enc.pals1.get(i);
+				List<RGB> pal = enc.pals1.get(i);
 				for (int j=0;j<pal.size();j++)
 				{
-					Integer irgb = new Integer(((RGB)pal.get(j)).ngp);
+					Integer irgb = Integer.valueOf(pal.get(j).ngp);
 					if (!v.contains(irgb))
 						v.add(irgb);
 				}
@@ -1299,33 +1362,62 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		RGB rgbi = new RGB(0);
 		RGB rgbn = new RGB(0);
 		int empty0 = 0, empty1 = 0;
-		ArrayList<int[]> tiles = new ArrayList<int[]>();
 		int duplicated = 0;
+		// First pass: build the deduplicated tileset exactly like generateOut does
+		// (imgs0 in order, then imgs1 when there are 2 planes), so that resolving a
+		// source tile below yields the very tile that will be emitted. When tile
+		// reduction is enabled with a fuzz > 0 tolerance, a source tile may resolve
+		// to a *different* (representative) tile, which is what the hardware shows.
+		List<int[]> tiles = new ArrayList<>();
+		for (int i=0;i<enc.imgs0.size();i++)
+		{
+			int[] p = enc.imgs0.get(i);
+			if (index(tiles, p, reduce?fuzz:0) < 0) {
+				tiles.add(p);
+				tiles.add(buildTile(p, true, false));
+				tiles.add(buildTile(p, false, true));
+				tiles.add(buildTile(p, true, true));
+			} else {
+				duplicated += 1;
+			}
+		}
+		if (planes>1)
+		{
+			for (int i=0;i<enc.imgs1.size();i++)
+			{
+				int[] p = enc.imgs1.get(i);
+				if (index(tiles, p, reduce?fuzz:0) < 0) {
+					tiles.add(p);
+					tiles.add(buildTile(p, true, false));
+					tiles.add(buildTile(p, false, true));
+					tiles.add(buildTile(p, true, true));
+				} else {
+					duplicated += 1;
+				}
+			}
+		}
+		// Second pass: render / measure using the representative tile each source
+		// tile actually maps to, so both the NGPC preview and the reported Diff
+		// reflect the real (possibly fuzzy-merged) output.
 		for (int i=0;i<h;i++)
 		{
 			for (int j=0;j<line;j++)
 			{
-				int[] pix0 = (int[])enc.imgs0.get(i*line+j),pix1=null;
-				if (index(tiles, pix0) < 0) {
-					tiles.add(pix0);
-					tiles.add(buildTile(pix0, true, false));
-					tiles.add(buildTile(pix0, false, true));
-					tiles.add(buildTile(pix0, true, true));
-				} else {
-					duplicated += 1;
+				int[] pix0 = enc.imgs0.get(i*line+j),pix1=null;
+				if (reduce) {
+					int r0 = index(tiles, pix0, fuzz);
+					if (r0 >= 0)
+						pix0 = tiles.get(r0);
 				}
-				ArrayList pal0 = (ArrayList)enc.pals0.get(((Int)enc.palIdx0.get(i*line+j)).value),pal1 = null;
+				List<RGB> pal0 = enc.pals0.get(enc.palIdx0.get(i*line+j).value),pal1 = null;
 				if (planes>1)
 				{
-					pal1 = (ArrayList)enc.pals1.get(((Int)enc.palIdx1.get(i*line+j)).value);
-					pix1 = (int[])enc.imgs1.get(i*line+j);
-					if (index(tiles, pix1) < 0) {
-						tiles.add(pix1);
-						tiles.add(buildTile(pix1, true, false));
-						tiles.add(buildTile(pix1, false, true));
-						tiles.add(buildTile(pix1, true, true));
-					} else {
-						duplicated += 1;
+					pal1 = enc.pals1.get(enc.palIdx1.get(i*line+j).value);
+					pix1 = enc.imgs1.get(i*line+j);
+					if (reduce) {
+						int r1 = index(tiles, pix1, fuzz);
+						if (r1 >= 0)
+							pix1 = tiles.get(r1);
 					}
 				}
 				int n0 = 0, n1 = 0;
@@ -1334,12 +1426,12 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 					for (int l=0;l<8;l++)
 					{
 						int p0 = pix0[k*8+l];
-						int rgb0 = ((RGB)pal0.get(p0)).rgb();
+						int rgb0 = pal0.get(p0).rgb();
 						int rgb;
 						if (planes>1)
 						{
 							int p1 = pix1[k*8+l];
-							int rgb1 = ((RGB)pal1.get(p1)).rgb();
+							int rgb1 = pal1.get(p1).rgb();
 							rgb = p1==0?rgb0:rgb1;
 							if (p1 == 0) {
 								n1 += 1;
@@ -1354,7 +1446,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 						img.setRGB(j*8+l,i*8+k,rgb);
 						rgbn.setRGB(rgb);
 						rgbi.setRGB(bi.getRGB(j*8+l,i*8+k));
-						diff.value+=rgbi.dist(rgbn);
+						diff.value+=(int)rgbi.dist(rgbn);
 					}
 				}
 				if (n0 == 64) {
@@ -1389,14 +1481,47 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		ngpc.setIcon(icon);
 	}
 	
-	private static int index(ArrayList<int[]> tiles, int[] tile) {
+	private static int index(List<int[]> tiles, int[] tile) {
+		return index(tiles, tile, 0);
+	}
+
+	/**
+	 * Return the index of the first tile in the list that matches the given
+	 * tile within a tolerance of at most fuzz differing pixels (fuzz==0 means
+	 * exact match, identical to the previous behavior). When flip reduction is
+	 * enabled the list already stores the 4 orientations of each logical tile
+	 * contiguously, so comparing against every entry also covers flipped matches.
+	 */
+	private static int index(List<int[]> tiles, int[] tile, int fuzz) {
+		if (fuzz <= 0) {
+			for (int i = 0; i < tiles.size(); ++i) {
+				if (Arrays.equals(tiles.get(i), tile)) {
+					return i;
+				}
+			}
+			return -1;
+		}
+		int best = -1, bestDiff = fuzz + 1;
 		for (int i = 0; i < tiles.size(); ++i) {
 			int[] t = tiles.get(i);
-			if (Arrays.equals(t, tile)) {
-				return i;
+			if (t.length != tile.length) {
+				continue;
+			}
+			int d = 0;
+			for (int j = 0; j < t.length && d < bestDiff; ++j) {
+				if (t[j] != tile[j]) {
+					++d;
+				}
+			}
+			if (d <= fuzz && d < bestDiff) {
+				best = i;
+				bestDiff = d;
+				if (d == 0) {
+					break;
+				}
 			}
 		}
-		return -1;
+		return best;
 	}
 
 	private static int[] buildTile(int[] tile, boolean vflip, boolean hflip) {
@@ -1422,10 +1547,14 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		int wi = image.getWidth(null);
 		int hi = image.getHeight(null);
 		BufferedImage bi = new BufferedImage(160,152,BufferedImage.TYPE_INT_ARGB);
-		bi.getGraphics().setColor(Color.black);
-		bi.getGraphics().clearRect(0,0,160,152);
+		Graphics2D g = bi.createGraphics();
+		g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+		g.setRenderingHint(RenderingHints.KEY_RENDERING,RenderingHints.VALUE_RENDER_QUALITY);
+		g.setRenderingHint(RenderingHints.KEY_ANTIALIASING,RenderingHints.VALUE_ANTIALIAS_ON);
+		g.setColor(Color.black);
+		g.fillRect(0,0,160,152);
 		if (!max && wi<=160 && hi<=152)
-			bi.getGraphics().drawImage(image,(160-wi)/2,(152-hi)/2,null);
+			g.drawImage(image,(160-wi)/2,(152-hi)/2,null);
 		else
 		{
 			double fw = 160.0/wi,fh = 152.0/hi;
@@ -1437,8 +1566,12 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 			int h = (int)(hi*fw);
 			int x = (160-w)/2;
 			int y = (152-h)/2;
-			bi.getGraphics().drawImage(image,x,y,x+w-1,y+h-1,0,0,wi-1,hi-1,null);
+			g.drawImage(image,x,y,x+w-1,y+h-1,0,0,wi-1,hi-1,null);
 		}
+		g.dispose();
+		
+		// Ordered (Bayer 4x4) dithering toward the 4-bit NGPC color space to reduce banding
+		applyDither(bi);
 		
 		_encodeHC(bi,id,contrast,planes,balance,nbcol,diff,out,cont,otype,true);
 		
@@ -1454,7 +1587,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 	public static void _encodeHC(BufferedImage bi,String id,int contrast,int planes,int balance,Int nbcol,Int diff,OutputStream out,Int cont,int otype,boolean full) throws Exception
 	{
 		
-		ArrayList vimg= new ArrayList(20*19);
+		List<int[]> vimg= new ArrayList<>(20*19);
 		doTiles(bi,vimg);
 		
 		PrintWriter pw = null;
@@ -1485,7 +1618,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 			pw.flush();
 		}
 		
-		ArrayList colors = new ArrayList();
+		List<Integer> colors = new ArrayList<>();
 		
 		for (int i=0;i<19;i++)
 		{
@@ -1496,7 +1629,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 				vimg.remove(0);
 			}
 			encode(enc,contrast,planes,balance,null,cont,8);
-			generateOut(null,enc,20,i,planes,out,out1,out2,otype,false,false,false);
+			generateOut(null,enc,20,i,planes,out,out1,out2,otype,false,false,false,0);
 			showResultHC(enc,i,planes,nbcol,diff,bi,colors);
 		}
 		if (planes>1)
@@ -1536,14 +1669,14 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		nbcol.value = colors.size();
 	}
 	
-	private static void showResultHC(Encoding enc,int h,int planes,Int nbcol,Int diff,BufferedImage bi,ArrayList v)
+	private static void showResultHC(Encoding enc,int h,int planes,Int nbcol,Int diff,BufferedImage bi,List<Integer> v)
 	{
 		for (int i=0;i<enc.pals0.size();i++)
 		{
-			ArrayList pal = (ArrayList)enc.pals0.get(i);
+			List<RGB> pal = enc.pals0.get(i);
 			for (int j=0;j<pal.size();j++)
 			{
-				Integer irgb = new Integer(((RGB)pal.get(j)).ngp);
+				Integer irgb = Integer.valueOf(pal.get(j).ngp);
 				if (!v.contains(irgb))
 					v.add(irgb);
 			}
@@ -1552,10 +1685,10 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		{
 			for (int i=0;i<enc.pals1.size();i++)
 			{
-				ArrayList pal = (ArrayList)enc.pals1.get(i);
+				List<RGB> pal = enc.pals1.get(i);
 				for (int j=0;j<pal.size();j++)
 				{
-					Integer irgb = new Integer(((RGB)pal.get(j)).ngp);
+					Integer irgb = Integer.valueOf(pal.get(j).ngp);
 					if (!v.contains(irgb))
 						v.add(irgb);
 				}
@@ -1567,23 +1700,23 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		
 		for (int j=0;j<20;j++)
 		{
-			int[] pix0 = (int[])enc.imgs0.get(j),pix1=null;
-			ArrayList pal0 = (ArrayList)enc.pals0.get(((Int)enc.palIdx0.get(j)).value),pal1 = null;
+			int[] pix0 = enc.imgs0.get(j),pix1=null;
+			List<RGB> pal0 = enc.pals0.get(enc.palIdx0.get(j).value),pal1 = null;
 			if (planes>1)
 			{
-				pal1 = (ArrayList)enc.pals1.get(((Int)enc.palIdx1.get(j)).value);
-				pix1 = (int[])enc.imgs1.get(j);
+				pal1 = enc.pals1.get(enc.palIdx1.get(j).value);
+				pix1 = enc.imgs1.get(j);
 			}
 			for (int k=0;k<8;k++)
 			{
 				for (int l=0;l<8;l++)
 				{
 					int p0 = pix0[k*8+l];
-					int rgb0 = ((RGB)pal0.get(p0)).rgb(),rgb1,rgb;
+					int rgb0 = pal0.get(p0).rgb(),rgb1,rgb;
 					if (planes>1)
 					{
 						int p1 = pix1[k*8+l];
-						rgb1 = ((RGB)pal1.get(p1)).rgb();
+						rgb1 = pal1.get(p1).rgb();
 						rgb = p1==0?rgb0:rgb1;
 					}
 					else
@@ -1591,21 +1724,21 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 					rgbi.setRGB(bi.getRGB(j*8+l,h*8+k));
 					bi.setRGB(j*8+l,h*8+k,rgb);
 					rgbn.setRGB(rgb);
-					diff.value+=rgbi.dist(rgbn);
+					diff.value+=(int)rgbi.dist(rgbn);
 				}
 			}
 		}
 	}
 	
-	/******/
-	/* UI */
-	/******/
+	/**
+	 * UI
+	 */
 	
 	JTextField tf_name;
-	JComboBox cb_contrast;
-	JComboBox cb_planes;
-	JComboBox cb_balance;
-	JComboBox cb_nbpals;
+	JComboBox<String> cb_contrast;
+	JComboBox<String> cb_planes;
+	JComboBox<String> cb_balance;
+	JComboBox<String> cb_nbpals;
 	JButton jb_load;
 	JButton jb_go;
 	JButton jb_stop;
@@ -1625,13 +1758,15 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 	JCheckBox cb_force;
 	JCheckBox cb_reduce;
 	JCheckBox cb_flip;
-	JComboBox cb_bgr;
-	JComboBox cb_bgg;
-	JComboBox cb_bgb;
+	JCheckBox cb_dither;
+	JSlider sl_merge;
+	JComboBox<String> cb_bgr;
+	JComboBox<String> cb_bgg;
+	JComboBox<String> cb_bgb;
 	JLabel jl_bg;
-	ByteArrayOutputStream output;
-	Thread thread;
-	Int best;
+	transient ByteArrayOutputStream output;
+	transient Thread thread;
+	transient Int best;
 	
 	public CodeImage()
 	{
@@ -1641,7 +1776,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		JPanel p,pp,p0;
 		main.add(p = new JPanel(new BorderLayout(4,4)),BorderLayout.NORTH);
 		
-		p.add(pp = new JPanel(new GridLayout(14,1,4,2)),BorderLayout.WEST);
+		p.add(pp = new JPanel(new GridLayout(16,1,4,2)),BorderLayout.WEST);
 		pp.add(new JLabel("File"));
 		pp.add(new JLabel("Contrast"));
 		pp.add(new JLabel("Planes"));
@@ -1654,22 +1789,24 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		pp.add(new JLabel("Resize"));
 		pp.add(new JLabel("Reduce tc"));
 		pp.add(new JLabel("Reduce with flip"));
+		pp.add(new JLabel("Dither"));
+		pp.add(new JLabel("Merge tiles"));
 		pp.add(new JLabel("Background"));
 		pp.add(new JLabel(""));
 		
-		pp = new JPanel(new GridLayout(14,1,4,2));
+		pp = new JPanel(new GridLayout(16,1,4,2));
 		p.add(pp,BorderLayout.CENTER);
 		pp.add(tf_name = new JTextField(""));
 		tf_name.setEditable(false);
-		pp.add(cb_contrast = new JComboBox());
+		pp.add(cb_contrast = new JComboBox<String>());
 		for (int i=-2;i<10;i++)
 			cb_contrast.addItem(String.valueOf(i));
 		cb_contrast.setSelectedIndex(3);
-		pp.add(cb_planes = new JComboBox());
+		pp.add(cb_planes = new JComboBox<String>());
 		cb_planes.addItem("1");
 		cb_planes.addItem("2");
 		cb_planes.setSelectedIndex(1);
-		pp.add(cb_balance = new JComboBox());
+		pp.add(cb_balance = new JComboBox<String>());
 		cb_balance.addItem("Color - middle");
 		cb_balance.addItem("Color - dark");
 		cb_balance.addItem("Color - light");
@@ -1677,7 +1814,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		cb_balance.addItem("Weight - dark");
 		cb_balance.addItem("Weight - light");
 		cb_balance.setSelectedIndex(0);
-		pp.add(cb_nbpals = new JComboBox());
+		pp.add(cb_nbpals = new JComboBox<String>());
 		for (int i=1;i<17;i++)
 			cb_nbpals.addItem(String.valueOf(i));
 		cb_nbpals.setSelectedIndex(15);
@@ -1702,15 +1839,31 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		pp.add(cb_flip = new JCheckBox());
 		cb_flip.setActionCommand("FLIP");
 		cb_flip.addActionListener(this);
+		pp.add(cb_dither = new JCheckBox());
+		cb_dither.setActionCommand("DITHER");
+		cb_dither.addActionListener(this);
+		pp.add(sl_merge = new JSlider(JSlider.HORIZONTAL, 0, 8, 0));
+		sl_merge.setMajorTickSpacing(1);
+		sl_merge.setPaintTicks(true);
+		sl_merge.setPaintLabels(true);
+		sl_merge.setSnapToTicks(true);
+		{
+			Hashtable<Integer,JLabel> mlabels = new Hashtable<Integer,JLabel>();
+			for (int i=0;i<=8;i++)
+				mlabels.put(Integer.valueOf(i), new JLabel(String.valueOf(i)));
+			sl_merge.setLabelTable(mlabels);
+		}
+		sl_merge.addChangeListener(this);
+		sl_merge.setEnabled(false); // enabled only when "Reduce tc" is checked
 		JPanel bg = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 4));
 		bg.add(new JLabel("R"));
-		bg.add(cb_bgr = new JComboBox());
+		bg.add(cb_bgr = new JComboBox<String>());
 		cb_bgr.addItemListener(this);
 		bg.add(new JLabel("G"));
-		bg.add(cb_bgg = new JComboBox());
+		bg.add(cb_bgg = new JComboBox<String>());
 		cb_bgg.addItemListener(this);
 		bg.add(new JLabel("B"));
-		bg.add(cb_bgb = new JComboBox());
+		bg.add(cb_bgb = new JComboBox<String>());
 		cb_bgb.addItemListener(this);
 		for (int i=0;i<256;i++) {
 			cb_bgr.addItem(String.valueOf(i));
@@ -1815,6 +1968,12 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 	public void itemStateChanged(ItemEvent e)
 	{
 		cb_balance.setEnabled(cb_planes.getSelectedIndex()>0);
+		resetCtl();
+	}
+	
+	public void stateChanged(ChangeEvent e)
+	{
+		// Fired by the "Merge tiles" tolerance slider.
 		resetCtl();
 	}
 	
@@ -1923,23 +2082,24 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 						String id = fromName(tf_name.getText());
 						if (cb_hicolor.isSelected())
 							encodeHC(tf_name.getText(),id,
-									U-Integer.valueOf((String)cb_contrast.getSelectedItem()).intValue(),
+									U-Integer.parseInt((String)cb_contrast.getSelectedItem()),
 									cb_planes.getSelectedIndex()+1,
 									cb_balance.getSelectedIndex(),
 									nbcol,diff,jb_original,jb_ngpc,CodeImage.this,output,cont,cb_asm.isSelected()?ASM:C,cb_max.isSelected());
 						else
 							encode(tf_name.getText(),id,
-									U-Integer.valueOf((String)cb_contrast.getSelectedItem()).intValue(),
+									U-Integer.parseInt((String)cb_contrast.getSelectedItem()),
 									cb_planes.getSelectedIndex()+1,
 									cb_balance.getSelectedIndex(),
-									Integer.valueOf((String)cb_nbpals.getSelectedItem()).intValue(),
+									Integer.parseInt((String)cb_nbpals.getSelectedItem()),
 									nbcol,diff,jb_original,jb_ngpc,CodeImage.this,output,cont,cb_asm.isSelected()?ASM:C,
-									cb_force.isSelected(),cb_reduce.isSelected(),cb_flip.isSelected(),cb_resize.isSelected());
+									cb_force.isSelected(),cb_reduce.isSelected(),cb_flip.isSelected(),cb_resize.isSelected(),cb_dither.isSelected(),
+								cb_reduce.isSelected()?sl_merge.getValue():0);
 						if (cont.value>0)
 						{
 							tf_colors.setText(String.valueOf(nbcol.value));
 							tf_diff.setText(String.valueOf(diff.value));
-							tf_params.setText("java CodeImage \""+tf_name.getText()+"\" "+id+" -p"+cb_planes.getSelectedItem()+" -c"+cb_contrast.getSelectedItem()+(cb_balance.isEnabled()?" -b"+bals[cb_balance.getSelectedIndex()]:"")+(cb_nbpals.isEnabled()?" -n"+cb_nbpals.getSelectedItem():"")+(cb_asm.isSelected()?" -a":"")+(cb_hicolor.isSelected()?" -h":""));
+							tf_params.setText("java CodeImage \""+tf_name.getText()+"\" "+id+" -p"+cb_planes.getSelectedItem()+" -c"+cb_contrast.getSelectedItem()+(cb_balance.isEnabled()?" -b"+bals[cb_balance.getSelectedIndex()]:"")+(cb_nbpals.isEnabled()?" -n"+cb_nbpals.getSelectedItem():"")+(cb_asm.isSelected()?" -a":"")+(cb_hicolor.isSelected()?" -h":"")+(cb_dither.isSelected()?" -d":"")+(cb_reduce.isSelected()?(cb_flip.isSelected()?" -w":" -r"):"")+(cb_reduce.isSelected()&&sl_merge.getValue()>0?" -m"+sl_merge.getValue():""));
 							if (best.value<0 || diff.value<best.value)
 								tf_best.setText("Diff="+(best.value=diff.value)+" Contrast="+cb_contrast.getSelectedItem()+" Balance=["+cb_balance.getSelectedItem()+"] Planes="+cb_planes.getSelectedItem()+(cb_hicolor.isSelected()?" HiColor":" Palettes="+cb_nbpals.getSelectedItem()));
 						}
@@ -1997,6 +2157,20 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		{
 			resetCtl();
 		}
+		else if (cmd.equals("DITHER"))
+		{
+			resetCtl();
+		}
+		else if (cmd.equals("REDUCE"))
+		{
+			// The tile-merge tolerance slider only applies when tile reduction is on.
+			sl_merge.setEnabled(cb_reduce.isSelected());
+			resetCtl();
+		}
+		else if (cmd.equals("FLIP"))
+		{
+			resetCtl();
+		}
 		else if (cmd.equals("QUIT"))
 			System.exit(0);
 	}
@@ -2021,9 +2195,9 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		return name.substring(p0<0?0:p0,p1<0?name.length():p1);
 	}
 	
-	/********/
-	/* MAIN */
-	/********/
+	/**
+	 * MAIN
+	 */
 	
 	public static void main(String[] args) throws Exception
 	{
@@ -2042,6 +2216,10 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		int nbpals = 15;
 		int otype = C;
 		boolean hc = false;
+		boolean dither = false;
+		boolean reduce = false;
+		boolean flip = false;
+		int fuzz = 0;
 		String name = null;
 		String id = null;
 		for (int i=0;i<args.length;i++)
@@ -2057,7 +2235,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 			String pref = args[i].substring(0,2);
 			String suffix = args[i].substring(2);
 			if (pref.equals("-c"))
-				contrast = Integer.valueOf(suffix).intValue();
+				contrast = Integer.parseInt(suffix);
 			else if (pref.equals("-b"))
 			{
 				int j;
@@ -2066,13 +2244,29 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 					balance = j;
 			}
 			else if (pref.equals("-p"))
-				planes = Integer.valueOf(suffix).intValue();
+				planes = Integer.parseInt(suffix);
 			else if (pref.equals("-n"))
-				nbpals = Integer.valueOf(suffix).intValue();
+				nbpals = Integer.parseInt(suffix);
 			else if (pref.equals("-a"))
 				otype = ASM;
 			else if (pref.equals("-h"))
 				hc = true;
+			else if (pref.equals("-d"))
+				dither = true;
+			else if (pref.equals("-r"))
+				reduce = true;
+			else if (pref.equals("-w"))
+			{
+				reduce = true;
+				flip = true;
+			}
+			else if (pref.equals("-m"))
+			{
+				fuzz = Integer.parseInt(suffix);
+				if (fuzz < 0)
+					fuzz = 0;
+				reduce = true;
+			}
 		}
 		if (id==null)
 			id = fromName(name);
@@ -2080,7 +2274,7 @@ public class CodeImage extends JFrame implements ActionListener,ItemListener
 		if (hc)
 			encodeHC(name,id,U-contrast,planes,balance,nbcol,diff,null,null,null,out,(new Int(1)),otype,false);
 		else
-			encode(name,id,U-contrast,planes,balance,nbpals,nbcol,diff,null,null,null,out,(new Int(1)),otype,false,false,false,false);
+			encode(name,id,U-contrast,planes,balance,nbpals,nbcol,diff,null,null,null,out,(new Int(1)),otype,false,reduce,flip,false,dither,fuzz);
 		System.err.println("Colors="+nbcol.value);
 		System.err.println("Diff="+diff.value);
 		System.exit(0);

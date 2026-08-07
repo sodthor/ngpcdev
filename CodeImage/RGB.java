@@ -37,10 +37,12 @@ public class RGB
     value = (255<<24)+(red<<16)+(green<<8)+blue;
   }
 
-  public int hashcode() {
+  @Override
+  public int hashCode() {
 	  return value;
   }
 
+  @Override
   public boolean equals(Object o)
   {
     if (o==null)
@@ -73,7 +75,10 @@ public class RGB
     long g = rgb.green-green; 
     long b = rgb.blue-blue;
     /**/
-    return r*r+g*g+b*b;
+    // Perceptual (luma-weighted) squared distance : green weighted highest,
+    // blue lowest, matching human sensitivity. Kept on the same scale as the
+    // former r*r+g*g+b*b so contrast/U merge behaviour stays comparable.
+    return (r*r*30 + g*g*59 + b*b*11)/100;
   }
 
   private static int merge(int a,int b,int wa,int wb,int u, int v)
@@ -98,6 +103,7 @@ public class RGB
     return (255<<24)+(r<<16)+(g<<8)+b;
   }
 
+  @Override
   public String toString()
   {
     return "("+red+","+green+","+blue+","+CodeImage.int2Hex(ngp,3)+")";

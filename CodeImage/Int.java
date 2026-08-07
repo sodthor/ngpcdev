@@ -7,6 +7,7 @@ public class Int
     value = v;
   }
 
+  @Override
   public boolean equals(Object o)
   {
     if ((o==null) || !(o instanceof Int))
@@ -14,6 +15,13 @@ public class Int
     return ((Int)o).value == value;
   }
 
+  @Override
+  public int hashCode()
+  {
+    return value;
+  }
+
+  @Override
   public String toString()
   {
     return String.valueOf(value);

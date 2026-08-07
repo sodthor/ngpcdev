@@ -81,7 +81,7 @@ public class GIF2NGP
 		{
 			id = args[0];
 			ext = args[1];
-			delay = Integer.valueOf(args[2]).intValue();
+			delay = Integer.parseInt(args[2]);
 			if (args.length>=4)
 				stype = args[3]; 
 			if (args.length>=5)
@@ -217,7 +217,7 @@ public class GIF2NGP
 				frame = getFrame(i);
 				bi.getGraphics().drawImage(frame,x,y+i*H,x+w,y+h+i*H,0,0,wi,hi,null);
 			}
-			CodeImage.encode(bi,id,CodeImage.U-1,1,0,16,col,diff,null,null,null,os,new Int(1),otype,true,false,false,false);
+			CodeImage.encode(bi,id,CodeImage.U-1,1,0,16,col,diff,null,null,null,os,new Int(1),otype,true,false,false,false,false,0);
 			cols=col.value;
 			diffs=diff.value;
 			pw.println(new String(((ByteArrayOutputStream)os).toByteArray()));
@@ -237,7 +237,7 @@ public class GIF2NGP
 				throw new Exception("Can not open : mplayerc.ngp. File is missing.");
 			byte[] buf = new byte[(int)ngp.length()];
 			InputStream is = new BufferedInputStream(new FileInputStream(ngp));
-			is.read(buf);
+			is.readNBytes(buf, 0, buf.length);
 			is.close();
 			
 			byte[] data = ((ByteArrayOutputStream)os).toByteArray();
@@ -269,7 +269,7 @@ public class GIF2NGP
 			if (music.length>1355)
 				throw new Exception("Music too long : "+music.length+">1355");
 			is = new BufferedInputStream(new FileInputStream(mus));
-			is.read(music);
+			is.readNBytes(music, 0, music.length);
 			is.close();
 			for (int j=0;j<music.length;j++)
 				buf[m++] = music[j];

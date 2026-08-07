@@ -1,6 +1,7 @@
 import java.net.*;
 import java.io.*;
 import java.util.*;
+import java.util.List;
 import java.awt.*;
 import java.awt.image.*;
 
@@ -88,7 +89,7 @@ public class GifDecoder {
    protected byte[] pixelStack;
    protected byte[] pixels;
 
-   protected ArrayList frames;     // frames read from current file
+   protected List<GifFrame> frames;     // frames read from current file
    protected int frameCount;
 
    static class GifFrame {
@@ -111,7 +112,7 @@ public class GifDecoder {
       //
       delay = -1;
       if ((n >= 0) && (n < frameCount))
-         delay = ((GifFrame) frames.get(n)).delay;
+         delay = frames.get(n).delay;
       return delay;
    }
 
@@ -124,7 +125,7 @@ public class GifDecoder {
    public BufferedImage getFrame(int n) {
       BufferedImage im = null;
       if ((n >= 0) && (n < frameCount))
-         im = ((GifFrame) frames.get(n)).image;
+         im = frames.get(n).image;
       return im;
    }
 
@@ -196,13 +197,13 @@ public class GifDecoder {
       try {
          name = name.trim();
          if (name.indexOf("://") > 0) {
-            URL url = new URL(name);
+            URL url = new URI(name).toURL();
             in = new BufferedInputStream(url.openStream());
          } else {
             in = new BufferedInputStream(new FileInputStream(name));
          }
          status = read(in);
-      } catch (IOException e) {
+      } catch (IOException | URISyntaxException e) {
          status = STATUS_OPEN_ERROR;
       }
 
@@ -344,7 +345,7 @@ public class GifDecoder {
    protected void init() {
        status = STATUS_OK;
       frameCount = 0;
-      frames = new ArrayList();
+      frames = new ArrayList<>();
       gct = null;
       lct = null;
    }
