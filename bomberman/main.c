@@ -886,7 +886,7 @@ void checkItem(u8 i,u8 x,u8 y,u8 b)
         case 13:
             if (chars[i].kind)
                 return;
-            chars[i].power+=1;
+            chars[i].power += (!duel || chars[i].power < 7) ? 1 : 0;
             break;
         case 14:
             if (b || chars[i].kind)
@@ -1788,17 +1788,6 @@ u8 initLink() {
     return 1;
 }
 
-/* duel() protocol (8 bytes per frame):
- *   [0] LINK_GAME header
- *   [1] player x (pixel)
- *   [2] player y (pixel)
- *   [3] player is alive flag (0x80) + direction (J_UP/J_DOWN/J_LEFT/J_RIGHT)
- *   [4] player animation: high nibble = anim, low nibble = count
- *   [5] bomb sequence counter (monotonic, wraps at 256)
- *   [6] last bomb tile: high nibble = x, low nibble = y (0..14 each)
- *   [7] last bomb power (1..15)
- */
-
 static void duelInitMap(u8 host0)
 {
     u8 i,j;
@@ -1859,9 +1848,19 @@ static void duelInitChars(u8 host0)
         chars[i].alive = 0;
 }
 
+/* duelGame() protocol (8 bytes per frame):
+ *   [0] LINK_GAME header
+ *   [1] player x (pixel)
+ *   [2] player y (pixel)
+ *   [3] player is alive flag (0x80) + direction (J_UP/J_DOWN/J_LEFT/J_RIGHT)
+ *   [4] player animation: high nibble = anim, low nibble = count
+ *   [5] bomb sequence counter (monotonic, wraps at 256)
+ *   [6] last bomb tile: high nibble = x, low nibble = y (0..14 each)
+ *   [7] last bomb power (1..15)
+ */
+
 void duelGame()
 {
-
     /* Per-session bomb-sequence state (owned by duelGame()). */
     u8 myBombSeq = 0;          /* incremented each time the local player drops a bomb */
     u8 myBombXY = 0;           /* tile coords of the local player's last bomb         */
@@ -1870,6 +1869,8 @@ void duelGame()
 
     u8 newLinkState;
     u8 j, n, host0 = ngpc_linkkit_role() == LINKKIT_ROLE_HOST ? 1 : 0;
+
+    u8 loop = 0;
 
     lvl = 0;
     boss = 1;
@@ -1884,18 +1885,21 @@ void duelGame()
     duelInitChars(host0);
     clearSprites(0);
 
-    paused = 1;
+    paused = 0;
 
     while (1)
     {
         /* ---- local input & movement ---- */
-        u16 bb = moveChar();
+        u16 bb;
+        if (!paused && loop++ >= 60)
+            paused = 1;
+        bb = paused ? moveChar() : 0;
         if (bb) {
             /* latch this bomb so it keeps being advertised until the
              * peer acknowledges it by seq change; survives packet loss */
-            myBombSeq += 1;          /* 0 is the "no bomb yet" value */
+            myBombSeq = (myBombSeq + 1) & 0x1f; /* 0 is the "no bomb yet" value */
             myBombXY  = bb & 0x0ff;
-            myBombPow = chars[0].power;
+            myBombPow = chars[0].power - 1;
         }
 
         /* ---- stage outgoing frame ---- */
@@ -1904,9 +1908,9 @@ void duelGame()
         myBuffer[2] = chars[0].y;
         myBuffer[3] = (chars[0].alive == 1 ? 0x80 : 0) | chars[0].dir;
         myBuffer[4] = (chars[0].anim << 4) | chars[0].count;
-        myBuffer[5] = myBombSeq;
+        myBuffer[5] = myBombSeq | ((myBombPow & 0x7) << 5);
         myBuffer[6] = myBombXY;
-        myBuffer[7] = myBombPow;
+        myBuffer[7] = loop;
         ngpc_linkkit_stage(myBuffer);
         ngpc_linkkit_update();
 
@@ -1916,7 +1920,10 @@ void duelGame()
             ngpc_linkkit_peek(theirBuffer);
             if (theirBuffer[0] == LINK_GAME)
             {
-                u8 rSeq = theirBuffer[5];
+                u8 rSeq = theirBuffer[5] & 0x1f;
+
+                if (theirBuffer[7] > loop)
+                    loop = theirBuffer[7];
 
                 /* the remote console decides its own death */
                 if ((theirBuffer[3] & 0x80) == 0) {
@@ -1939,10 +1946,9 @@ void duelGame()
                  * mitted every frame, so we catch it on the next arrival. */
                 if (rSeq != 0 && rSeq != lastRemoteBombSeq)
                 {
-                    u8 bx = (theirBuffer[6] >> 4) & 0x0f;
-                    u8 by =  theirBuffer[6]       & 0x0f;
-                    u8 bp =  theirBuffer[7];
-                    if (bp == 0) bp = 1;
+                    u8 bx =  (theirBuffer[6] >> 4) & 0xf;
+                    u8 by =   theirBuffer[6]       & 0xf;
+                    u8 bp = ((theirBuffer[5] >> 5) & 0x7) + 1;
                     lastRemoteBombSeq = rSeq;
                     if (bx < 15 && by < 15 && curmap[bx][by] == 11 && nb_bombs < MAX_BOMBS)
                     {
@@ -1966,8 +1972,13 @@ void duelGame()
         if (chars[0].alive != 1)
             break;
 
-        setMainSprite(0, 0, 0);
-        setMainSprite(12, 1, 1);
+        if (paused || (loop&4))
+        {
+            setMainSprite(0, 0, 0);
+            setMainSprite(12, 1, 1);
+        }
+        else
+			clearSprites(0);
 
         /* ---- link lost check ---- */
         newLinkState = ngpc_linkkit_state();
