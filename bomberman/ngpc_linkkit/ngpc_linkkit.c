@@ -114,6 +114,7 @@ static u16 lk_draw_token(void)
 {
     u16 t;
     t  = (u16)(lk_frames * 2654u);
+    t ^= GetRandom(65535);
     t ^= (u16)(((u16)LKCOM_JOYPAD) << 7);
     t ^= (u16)(((u16)lk_ties) * 40503u);
     t ^= (u16)(((u16)LKCOM_RX_COUNT) << 3);
