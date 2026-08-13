@@ -20,36 +20,36 @@
 #include "ngpc_linkkit/ngpc_linkkit_com.h"
 
 #if NGPC_LINKKIT_FORCE_EI0
-#define COM_EXTRA_EI()  __asm(" ei 0")
+#define COM_EXTRA_EI()  __asm("    ei 0")
 #else
 #define COM_EXTRA_EI()
 #endif
 
 #define COM_ENTER()                     \
-    __asm(" push sr");                  \
-    __asm(" push xix");                 \
-    __asm(" ldf 3");                    \
-    __asm(" add w, w");                 \
-    __asm(" add w, w");                 \
-    __asm(" ld xix, 0xfffe00");         \
-    __asm(" ld xix, (xix+w)");          \
-    __asm(" call xix");                 \
-    __asm(" pop xix");                  \
-    __asm(" pop sr");                   \
+    __asm("    push sr");                  \
+    __asm("    push xix");                 \
+    __asm("    ldf 3");                    \
+    __asm("    add w, w");                 \
+    __asm("    add w, w");                 \
+    __asm("    ld xix, 0xfffe00");         \
+    __asm("    ld xix, (xix+w)");          \
+    __asm("    call xix");                 \
+    __asm("    pop xix");                  \
+    __asm("    pop sr");                   \
     COM_EXTRA_EI()
 
 /* ---- No-argument calls ---- */
 
-void lkcom_init(void)       { __asm(" ld rw3, 0x10"); COM_ENTER(); }
-void lkcom_send_start(void) { __asm(" ld rw3, 0x11"); COM_ENTER(); }
-void lkcom_recv_start(void) { __asm(" ld rw3, 0x12"); COM_ENTER(); }
-void lkcom_rts_on(void)     { __asm(" ld rw3, 0x15"); COM_ENTER(); }
+void lkcom_init(void)       { __asm("    ld rw3, 0x10"); COM_ENTER(); }
+void lkcom_send_start(void) { __asm("    ld rw3, 0x11"); COM_ENTER(); }
+void lkcom_recv_start(void) { __asm("    ld rw3, 0x12"); COM_ENTER(); }
+void lkcom_rts_on(void)     { __asm("    ld rw3, 0x15"); COM_ENTER(); }
 
 void lkcom_rts_off(void)
 {
     /* The BIOS does `ei 6` in here, masking VBlank. The `pop sr` in COM_ENTER
      * is what puts your interrupt level back -- do not drop it. */
-    __asm(" ld rw3, 0x16");
+    __asm("    ld rw3, 0x16");
     COM_ENTER();
 }
 
@@ -57,69 +57,62 @@ void lkcom_rts_off(void)
 
 void lkcom_create_data(u8 b) // equivalent to Link_SendByte()
 {
-    __asm(" ld rw3, 0x13");
-    __asm(" ld xde, (xsp+4)");    /* argument, read before the pushes */
-    __asm(" ld rb3, e");          /* rb3 = byte to send               */
+    __asm("    ld rw3, 0x13");
+    __asm("    ld de, (xsp+4)");     /* argument, read before the pushes */
+    __asm("    ld rb3, e");          /* rb3 = byte to send               */
     COM_ENTER();
 }
 
 /* ---- One byte in: the BIOS leaves it in rb3 ---- */
 
-void lkcom_get_data(u8 *out) // Equivalent to Link_ReceiveByte()
+u8 lkcom_get_data() // Equivalent to Link_ReceiveByte()
 {
-    __asm(" ld rw3, 0x14");
+    __asm("    ld rw3, 0x14");
     COM_ENTER();
-    __asm(" ld xde, (xsp+4)");    /* output pointer, xsp balanced again */
     /* A store straight from a bank-3 register to memory is not encodable, so
      * the value has to transit through a register of the current bank. */
-    __asm(" ldb a, rb3");
-    __asm(" ldb (xde), a");       /* *out = received byte               */
+    __asm("    ld l, rb3");
+    return __L;
 }
 
 /* ---- Blocks: xhl3 = pointer, rb3 = size ---- */
 
 void lkcom_send_block(const u8 *p, u8 n) // equivalent to Link_SendBuffer()
 {
-    __asm(" ld rw3, 0x19");
-    __asm(" ld xde, (xsp+4)");    /* a pointer is 4 bytes, so the second */
-    __asm(" ld xhl3, xde");       /* argument sits at +8, not +6         */
-    __asm(" ld xde, (xsp+8)");
-    __asm(" ld rb3, e");
+    __asm("    ld rw3, 0x19");
+    __asm("    ld xde, (xsp+4)");    /* a pointer is 4 bytes, so the second */
+    __asm("    ld xhl3, xde");
+    __asm("    ld de, (xsp+8)");     /* argument sits at +8         */
+    __asm("    ld rb3, e");
     COM_ENTER();
 }
 
 void lkcom_get_block(u8 *p, u8 n) // equivalent to Link_ReceiveBuffer()
 {
-    __asm(" ld rw3, 0x1a");
-    __asm(" ld xde, (xsp+4)");
-    __asm(" ld xhl3, xde");
-    __asm(" ld xde, (xsp+8)");
-    __asm(" ld rb3, e");
+    __asm("    ld rw3, 0x1a");
+    __asm("    ld xde, (xsp+4)");
+    __asm("    ld xhl3, xde");
+    __asm("    ld de, (xsp+8)");
+    __asm("    ld rb3, e");
     COM_ENTER();
 }
 
 /* ---- Status words: the BIOS returns them in rwa3 (W = high, A = low) ---- */
 
-void lkcom_send_status(u16 *out)
+u16 lkcom_send_status()
 {
-    __asm(" ld rw3, 0x17");
+    __asm("    ld rw3, 0x17");
     COM_ENTER();
-    __asm(" ld xde, (xsp+4)");
-    __asm(" ldb a, ra3");         /* low byte  = count      */
-    __asm(" ldb (xde), a");
-    __asm(" ldb a, rw3");         /* high byte = error bits */
-    __asm(" ldb (xde+1), a");
+    __asm("    ld hl, rwa3");         /* low byte  = count      */
+    return __HL;
 }
 
-void lkcom_recv_status(u16 *out)
+u16 lkcom_recv_status()
 {
-    __asm(" ld rw3, 0x18");
+    __asm("    ld rw3, 0x18");
     COM_ENTER();
-    __asm(" ld xde, (xsp+4)");
-    __asm(" ldb a, ra3");
-    __asm(" ldb (xde), a");
-    __asm(" ldb a, rw3");
-    __asm(" ldb (xde+1), a");
+    __asm("    ld hl, rwa3");
+    return __HL;
 }
 
 /* ---- Cable detect (advisory, see the header) ---- */

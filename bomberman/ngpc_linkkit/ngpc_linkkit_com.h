@@ -116,11 +116,11 @@ void lkcom_rts_off(void);      /* block it -- see rule 3 above          */
 
 void lkcom_create_data(u8 b);              /* queue one byte            */
 void lkcom_send_block(const u8 *p, u8 n);  /* queue n bytes, n <= 64    */
-void lkcom_get_data(u8 *out);              /* pop one byte into *out    */
+u8 lkcom_get_data();                       /* pop one byte into *out    */
 void lkcom_get_block(u8 *p, u8 n);
 
-void lkcom_send_status(u16 *out);
-void lkcom_recv_status(u16 *out);
+u16 lkcom_send_status();
+u16 lkcom_recv_status();
 
 #define lkcom_tx_pending()  ((u8)LKCOM_TX_COUNT)
 #define lkcom_rx_pending()  ((u8)LKCOM_RX_COUNT)

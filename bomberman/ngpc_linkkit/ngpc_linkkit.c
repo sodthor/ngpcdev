@@ -133,7 +133,7 @@ static void lk_purge_rx(void)
     u8 b, guard;
     guard = 0;
     while (lkcom_rx_pending() && guard < 255) {
-        lkcom_get_data(&b);
+        b = lkcom_get_data();
         guard++;
     }
     lk_reset_parser();
@@ -147,14 +147,11 @@ static void lk_purge_rx(void)
  * costs one frame; truncating costs the session. */
 static void lk_send_packet(const u8 *p, u8 len)
 {
-    u8 i;
-
     if (lkcom_tx_free() < len) {
         lk_c_skip++;
         return;
     }
-    for (i = 0; i < len; i++)
-        lkcom_create_data(p[i]);
+    lkcom_send_block(p, len);
     lkcom_send_start();
     lk_c_tx++;
 }
@@ -282,7 +279,7 @@ static void lk_poll(void)
 
     budget = LK_RX_BUDGET;
     while (budget && lkcom_rx_pending()) {
-        lkcom_get_data(&b);
+        b = lkcom_get_data();
         budget--;
 
         if (lk_len == 0) {
@@ -373,7 +370,7 @@ void ngpc_linkkit_update(void)
     /* A line error means the BIOS receiver needs re-arming. Reading the status
      * and doing nothing about it -- which is easy to write by accident -- just
      * leaves the port dead. */
-    lkcom_recv_status(&status);
+    status = lkcom_recv_status();
     if (status & LKCOM_RX_ERR_MASK) {
         lkcom_recv_start();
         lkcom_rts_on();
