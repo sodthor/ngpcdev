@@ -1617,11 +1617,11 @@ void __interrupt myVBL()
 
 u8 menu()
 {
-    u16 i = 0,j,k,l;
+    u16 i,j,k,l;
     s16 dl = 2, seed = 0;
     u8 x,y;
-    loadMenuGfx();
 
+    loadMenuGfx();
     print("CONTINUE",3,6);
     print("NEW GAME",3,8);
     print("HISCORES",3,10);
@@ -1695,6 +1695,7 @@ void showIntro()
 u8 linkState;
 u8 myBuffer[8];
 u8 theirBuffer[8];
+u8 host0;
 
 u8 initLink() {
     u8 iLoop, seed0 = GetRandom(255) & 0xff, seed1;
@@ -1707,26 +1708,31 @@ u8 initLink() {
     ngpc_linkkit_init();
 
     linkState = ngpc_linkkit_state();
+    theirBuffer[0] = 0;
 
     while((!ReadyHost)||(!ReadyClient))
     {
         // Send and receive the joystick state between the two machines
         u8 iLoop;
 
-        myBuffer[0] = LINK_HANDSHAKE;
-        myBuffer[1] = 'B';
-        myBuffer[2] = 'B';
-        myBuffer[3] = 'M';
-        myBuffer[4] = 'A';
-        myBuffer[5] = 'N';
-        myBuffer[6] = 0x12; // version 1.2
-        myBuffer[7] = seed0;
-        ngpc_linkkit_stage(myBuffer); // stages the send
-        ngpc_linkkit_update(); // sends and receives data
-        if (ngpc_linkkit_fresh()) // Checks that the link is active
-        { 
-            ReadyHost = 1;
-            ngpc_linkkit_peek(theirBuffer); // Retrieves the data into gRx[]
+        if (!ReadyHost)
+        {
+            myBuffer[0] = LINK_HANDSHAKE;
+            myBuffer[1] = 'B';
+            myBuffer[2] = 'B';
+            myBuffer[3] = 'M';
+            myBuffer[4] = 'A';
+            myBuffer[5] = 'N';
+            myBuffer[6] = 0x12; // version 1.2
+            myBuffer[7] = seed0;
+            ngpc_linkkit_stage(myBuffer); // stages the send
+            ngpc_linkkit_update(); // sends and receives data
+            if (ngpc_linkkit_fresh()) // Checks that the link is active
+            { 
+                ReadyHost = 1;
+                theirBuffer[0] = 0;
+                ngpc_linkkit_peek(theirBuffer); // Retrieves the data into gRx[]
+            }
         }
 
         linkState = ngpc_linkkit_state();
@@ -1739,31 +1745,30 @@ u8 initLink() {
                 print("LINK READY", 0, 8);
                 break;
             case LINKKIT_LOST:
-                print("LINK LOST", 0, 8);
+                print("LINK LOST ", 0, 8);
                 break;
             case LINKKIT_MISMATCH:
-                print("MISMATCH!", 0, 8);
+                print("MISMATCH! ", 0, 8);
                 break;
             default:
-                print("RETRYING ", 0, 8);
+                print(" RETRYING ", 0, 8);
                 ngpc_linkkit_init();
                 break;
         }
         
-        ReadyClient = 1;
         switch (theirBuffer[0])
         {
             case LINK_HANDSHAKE:
                 // other client in handshake mode (as they should be)
                 // Check that their buffer contains the magic letters VINE
                 for (iLoop = 0; iLoop < 7; iLoop++) // only 7, 8th byte = seed sync
-                {
                     if(theirBuffer[iLoop] != myBuffer[iLoop])
-                    {
-                        ReadyClient=0;
-                    }
-                }
+                        return 0;
                 seed1 = theirBuffer[7];
+                if (seed1 == seed0)
+                    ReadyHost = 0;
+                else
+                    ReadyClient = 1;
                 break;
             case LINK_GAME:
             case LINK_META:
@@ -1786,10 +1791,11 @@ u8 initLink() {
         }
     }
     SeedRandom(seed0 + seed1);
+    host0 = seed0 > seed1;
     return 1;
 }
 
-static void duelInitMap(u8 host0)
+static void duelInitMap()
 {
     u8 i,j;
     for (i=0;i<15;i++)
