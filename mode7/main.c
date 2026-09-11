@@ -167,7 +167,7 @@ void setHBLTimer()
 #ifdef CLANG
     __asm("andb (TRUN),08eh");
     __asm("ldb  (TMOD),0");
-    __asm("ldb  (TREG0),88");
+    __asm("ldb  (TREG0),76");
     __asm("ldb  rw3,4");
     __asm("ldb  rb3,3");
     __asm("ldb  rc3,2");
@@ -180,12 +180,12 @@ void setHBLTimer()
     __asm("VECT_INTLVSET equ 0x4");
     __asm("andb (TRUN),0x8e");
     __asm("ldb  (T01MOD),0x00");
-    __asm("ldb  (TREG0),0x58");
+    __asm("ldb  (TREG0),0x4c");
     __asm("ldb  rw3,VECT_INTLVSET");
     __asm("ldb  rb3,0x03");
     __asm("ldb  rc3,0x02");
     __asm("swi  1");
-//    __asm("orb  (TRUN),0x1");
+    //__asm("orb  (TRUN),0x1");
 #endif
 }
 
