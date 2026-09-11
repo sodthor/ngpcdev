@@ -58,30 +58,29 @@ const ENTRY list[] = {
 
 #define FOV_HALF 64 //(PRECISION >> 3) // Math.PI / 4;
 
-volatile u16 skyX;
-volatile u16 teta;
+u16 skyX;
+u16 teta;
 s32 worldX;
 s32 worldY;
 
 u8* track;
 
 #define PIXEL \
-	if ((aX & FMASK) || (aY & FMASK))\
-		tile0 |= 3;\
+	if ((aX | aY) & FMASK)\
+		acc |= 3;\
 	else {\
 		color = track[(aX >> FSHIFT) + ((aY & FMASK_INV) << TF_SHIFT)];\
 		if (color & 4)\
-			tile1 |= color - 3;\
+			acc |= (u32)(color - 3) << 16;\
 		else\
-			tile0 |= color;\
+			acc |= color;\
 	}\
 	aX+=dX;\
 	aY+=dY;
 
 #define PIXEL_SHIFT \
 	PIXEL\
-	tile0 <<= 2;\
-	tile1 <<= 2;
+	acc <<= 2;
 
 void update()
 {
@@ -103,7 +102,7 @@ void update()
 
 	s32 startX, startY, dX, dY, sampleX, sampleY, aX, aY;
 	u16 x, y, color;
-	register u16 tile0, tile1;
+	register u32 acc;	/* low16 = tile0, high16 = tile1 */
 	register u16 *ty;
 
 	for (y = 1; y < 64; ++y)
@@ -111,14 +110,14 @@ void update()
 		startX = (fn1X / y) + near1X;
 		startY = (fn1Y / y) + near1Y;
 		dX = (fn2X / y) + near2X - startX;
-		dY = ( fn2Y/ y) + near2Y - startY;
+		dY = (fn2Y / y) + near2Y - startY;
 		ty = TILE_RAM + ((y >> 3) << 7) + (y & 7) + 8;
 
 		aX = startX << 7;
 		aY = startY << 7;
 		for (x = 0; x < 16; ++x, ty += 8)
 		{
-			tile0 = tile1 = 0;
+			acc = 0;
 			PIXEL_SHIFT
 			PIXEL_SHIFT
 			PIXEL_SHIFT
@@ -127,8 +126,8 @@ void update()
 			PIXEL_SHIFT
 			PIXEL_SHIFT
 			PIXEL
-			*ty = tile0;
-			*(ty + DY) = tile1;
+			*ty = (u16)acc;
+			*(ty + DY) = (u16)(acc >> 16);
 		}
 	}
 }
@@ -137,6 +136,7 @@ volatile u8 playing;
 
 void __interrupt myVBLInterrupt(void)
 {
+    __asm("orb  (TRUN),1");
     WATCHDOG = WATCHDOG_CLEAR;
     if (USR_SHUTDOWN)
     {
@@ -149,27 +149,44 @@ void __interrupt myVBLInterrupt(void)
 		Z80_COMM = 0xff; // PSG next frame
 }
 
-void __interrupt myHBLInterrupt()
+void __interrupt myHBL()
 {
-    if (RAS_Y == 76) // 64 + WIN_Y
+#ifdef CLANG
+	__asm("    ldb (08034h),0f0h");
+    __asm("    andb (TRUN),08eh");
+ 	__asm("    reti");
+#else
+    //if (RAS_Y == 76) // 64 + WIN_Y
     	SCR2_X = 240; // Track dx
+    __asm("    andb (TRUN),0x8e");
+#endif
 }
 
 void setHBLTimer()
 {
+#ifdef CLANG
+    __asm("andb (TRUN),08eh");
+    __asm("ldb  (TMOD),0");
+    __asm("ldb  (TREG0),76");
+    __asm("ldb  rw3,4");
+    __asm("ldb  rb3,3");
+    __asm("ldb  rc3,2");
+    __asm("swi  1");
+//    __asm("orb  (TRUN),1");
+#else
     __asm("TRUN          equ 0x0020");
     __asm("T01MOD        equ 0x0024");
     __asm("TREG0         equ 0x0022");
     __asm("VECT_INTLVSET equ 0x4");
-
     __asm("andb (TRUN),0x8e");
     __asm("ldb  (T01MOD),0x00");
-    __asm("ldb  (TREG0),0x01");
+    __asm("ldb  (TREG0),0x4c");
     __asm("ldb  rw3,VECT_INTLVSET");
     __asm("ldb  rb3,0x03");
     __asm("ldb  rc3,0x02");
     __asm("swi  1");
-    __asm("orb  (TRUN),0x1");
+    //__asm("orb  (TRUN),0x1");
+#endif
 }
 
 void playBGM(int cur)
@@ -214,7 +231,7 @@ void showSprite()
 	s32 farX = (sql * tcos[teta & PMASK]) >> PSHIFT;
 	s32 farY = (sql * tsin[teta & PMASK]) >> PSHIFT;
     s32 dot = (((dX * farX + dY * farY) * PMULT) / len) + PMULT - 1;
-   	SetSpritePosition(0, (u8) (72 + ((tsin[tacos[dot&0xff]] * 64) >> PSHIFT)), 64);
+   	SetSpritePosition(0, (u8)(72 + ((tsin[tacos[dot&0xff]] * 64) >> PSHIFT)), 64);
 	//SetSpritePosition(0, (u8) (72 - (len >> 8)), 64);
 }
 
@@ -279,7 +296,7 @@ void main()
 
 	DISABLE_INTERRUPTS;
 	VBL_INT = myVBLInterrupt;
-    HBL_INT = myHBLInterrupt;
+    HBL_INT = myHBL;
 	ENABLE_INTERRUPTS;
 
 	setHBLTimer();

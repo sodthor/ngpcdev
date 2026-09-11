@@ -21,13 +21,10 @@ void SL_SoundCPUStart()
 
 void SL_WaitZ80()
 {
-    __ASM("wait_z80:");
-    __ASM("ld a,(0xbc)");
-    __ASM("or a,a");
-    __ASM("jr nz,wait_z80");
+    while (Z80_COMM);
 }
 
-void __interrupt dma0Int();
+void __interrupt dma0Interrupt();
 
 void SL_SoundInit()
 {
@@ -48,13 +45,13 @@ void SL_SoundInit()
     pcmPlaying = 0;
 
     // Set DMA0 interrupt
-    __asm("ldb rw3,0x04"); // VECT_INTLVSET
-    __asm("ldb rb3,0x01"); // LOW priority
-    __asm("ldb rc3,0x06"); // DMA0
+    __asm("ldb rw3,4"); // VECT_INTLVSET
+    __asm("ldb rb3,1"); // LOW priority
+    __asm("ldb rc3,6"); // DMA0
     __asm("swi 1");
 
     __asm("di");
-    DMA0_INT = dma0Int;
+    DMA0_INT = dma0Interrupt;
     __asm("ei");
 
     Z80_COMM = 0xff;
@@ -105,9 +102,9 @@ void SL_PlayPCM(u8* pcmPtr, u16 pcmLen)
     pcmCount = pcmLen >> 1;
     __asm("ldl xwa, (_pcmData)");
     __asm("ldc DMAS0,xwa");
-    __asm("ldl xwa, 0xA2"); // DAC
+    __asm("ldl xwa, 162"); // DAC 0xa2
     __asm("ldc DMAD0,xwa");
-    __asm("ldb w, 0x09"); // Word I/O mode
+    __asm("ldb w, 9"); // Word I/O mode
     __asm("ldc DMAM0,w");
     __asm("ldw wa,(_pcmCount)");
     __asm("ldc DMAC0,wa");
@@ -121,7 +118,7 @@ void SL_PlayPCM(u8* pcmPtr, u16 pcmLen)
     TRUN |= TIMER2_ON | PRESCALER_ON;
 }
 
-void __interrupt dma0Int()
+void __interrupt dma0Interrupt()
 {
     // Stop timer 2
     TRUN &= TIMER2_ON ^ 0xff;

@@ -21,6 +21,11 @@ typedef u8 bool;
 
 #define RGB(r,g,b) ((u16)(r)&15) | (((u16)(g)&15)<<4) | (((u16)(b)&15)<<8)
 
+#ifdef CLANG
+#define __interrupt
+#define __ASM __asm
+#endif
+
 typedef void __interrupt Interrupt();
 typedef void (*FuncPtr)(void);
 
@@ -83,7 +88,7 @@ typedef void (*FuncPtr)(void);
 #define DMAM_COUNTER		0x1C
 
 #define Z80_NMI             (*(u8*)0x00BA)
-#define Z80_COMM            (*(u8*)0x00BC)
+#define Z80_COMM            (*(volatile u8*)0x00BC)
 #define WATCHDOG			(*(u8*)0x006F)
 #define SOUNDCPU_CTRL       (*(u16 *)0x00b8)
 #define INT_ROM				(*(u8*)0xFF0000)
@@ -197,8 +202,8 @@ typedef void (*FuncPtr)(void);
 #define VECT_COMCREATEBUFDATA				// Communication obtain create data buffer BIOS
 #define VECT_COMGETBUFDATA					// Communication write reception obtaining buffer	BIOS
 
-#define ENABLE_INTERRUPTS __asm("ei")
 #define DISABLE_INTERRUPTS __asm("di")
+#define ENABLE_INTERRUPTS __asm("ei")
 
 
 #endif	// _NGPC_H

@@ -1,0 +1,30 @@
+.SUFFIXES: .c .asm .ll
+NAME = MODE7
+
+# LLVM C compiler — works with clang-18 and clang-22. Override: make -f makefile.llvm CC=clang-22
+CC = clang-22
+
+all: ngpc.lcf $(NAME).ngp
+
+LL = main.ll music.ll library.ll
+
+$(NAME).asm $(NAME).inc: $(LL) ../transpiler/Ir2Tlcs900.class
+	java -cp ../transpiler Ir2Tlcs900 $(LL) -o $(NAME).asm --data-output $(NAME).inc
+
+../transpiler/Ir2Tlcs900.class: ../transpiler/Ir2Tlcs900.java
+	cd ../transpiler && javac Ir2Tlcs900.java
+
+$(NAME).ngp: $(NAME).asm $(NAME).inc
+	@while :; do \
+		wine ./build.bat $(NAME) > .jump-warnings.log 2>&1 || { cat .jump-warnings.log; exit 1; }; \
+		cat .jump-warnings.log; \
+		changed=$$(java -cp ../transpiler Ir2Tlcs900 --shorten-jumps-from-warnings $(NAME).asm .jump-warnings.log); \
+		[ "$$changed" -eq 0 ] && break; \
+	done
+	@rm -f .jump-warnings.log
+
+.c.ll:
+	$(CC) --target=arm-none-eabi -S -O3 -Wno-implicit-function-declaration -Wno-int-conversion -emit-llvm -DCLANG $<
+
+clean:
+	rm -f *.ll $(NAME).asm $(NAME).inc $(NAME).p $(NAME).ngp .jump-warnings.log
