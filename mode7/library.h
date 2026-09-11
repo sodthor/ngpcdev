@@ -11,8 +11,8 @@
  */
 void InitNGPC(void);
 void InstallTileSet(const unsigned short Tiles[][8], u16 Len);
-void InstallTileSetAt(const u16 Tiles[][8], u16 Len, u16 Offset);
 
+void SysShutdown(void);
 void ClearScreen(u8 ScrollPlane);
 void SetBackgroundColour(u16 Col);
 void SysSetSystemFont(void);
@@ -23,49 +23,42 @@ void GetTile(u8 ScrollPlane, u8 *PaletteNo, u8 XPos, u8 YPos, u16 *TileNo);
 void PutTile(u8 ScrollPlane, u8 PaletteNo, u8 XPos, u8 YPos, u16 TileNo);
 
 void PrintDecimal(u8 Plane, u8 PaletteNo, u8 x, u8 y, u16 Value, u8 Len);
-void PrintHex(u8 Plane, u8 PaletteNo, u8 x, u8 y, u32 Value, u8 Len);
 void PrintString(u8 Plane, u8 Palette, u8 XPos, u8 YPos, const char * theString);
 
-void SetSprite(u8 SpriteNo, u16 TileNo, u8 Chain, u8 XPos, u8 YPos, u8 PaletteNo);
+#define TOP_PRIO 24
+#define MIDDLE_PRIO 16
+#define LOW_PRIO 8
+
+void SetSprite(u8 SpriteNo, u16 TileNo, u8 Chain, u8 XPos, u8 YPos, u8 PaletteNo, u8 Prio);
 void SetSpritePosition(u8 SpriteNo, u8 XPos, u8 YPos);
-void SetSpriteFlip(u8 SpriteNo, bool HFlip, bool VFlip);
-void SetSpriteFlipChain(u8 SpriteNo, u8 XWidth, u8 YHeight, u8 tileCount, bool HFlip, bool VFlip);
-void SetPlanePosition(u8 Plane, u8 XPos, u8 YPos);
 
-void SetSpriteTile(u8 SpriteNo, u16 TileNo, u8 Chain);
-void SetSpriteHFlipBlock(u8 SpriteNo, u8 tileNo);
-
-s32 Multiply32bit(s32 Value1, s32 Value2);
-
+void SeedRandom(void);
 u16 GetRandom(u16 Value);
 
-typedef struct tagTIME
+typedef struct tagSoundEffect
 {
-   u8 Year;
-   u8 Month;
-   u8 Day;
-   u8 Hour;
-   u8 Minute;
-   u8 Second;
-   u8 LeapYear:4;
-   u8 Weekday:4;
-} TIME;
+   u8 Channel;
+   u8 Length;
+   u8 Repeat;
+   u16 InitialTone;
+   u16 ToneStep;
+   u8 ToneSpeed;
+   u8 ToneOWB;
+   u16 ToneLowerLimit;
+   u16 ToneUpperLimit;
+   u8 InitialVol;
+   u8 VolStep;
+   u8 VolSpeed;
+   u8 VolOWB;
+   u8 VolLowerLimit;
+   u8 VolUpperLimit;
+} SOUNDEFFECT;
 
-void GetTime(TIME * pTime);
+void InstallSoundDriver(void);
+void InstallSounds(const SOUNDEFFECT SoundData[], u8 NumSounds);
+void PlaySound(u8 SoundNumber);
+void StopAllSounds(void);
 
-typedef struct tagALARM
-{
-   u8 Day;
-   u8 Hour;
-   u8 Min;
-   u8 Code;
-} ALARM;
-
-void SetWake(ALARM * pAlarm);
-void SetAlarm(ALARM * pAlarm);
-
-void CpuSpeed(u8 spd);
-void ResumeOff(void);
 
 /*
  * Defines used by the library
@@ -78,6 +71,7 @@ void ResumeOff(void);
  * Public variables
  */
 extern volatile u8 VBCounter;
+
 
 #endif
 
