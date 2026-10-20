@@ -111,7 +111,7 @@ void gems_setCursorPosition(u8 x,u8 y)
     gems_setSpritePos(0,x+24,y);
 }
 
-void __interrupt gems_myVBL()
+void __interrupt gems_myVBLinterrupt()
 {
     WATCHDOG = WATCHDOG_CLEAR;
     if (USR_SHUTDOWN) { SysShutdown(); while (1); }
@@ -290,7 +290,7 @@ void gems_setTile16(u16 i,u16 j,u16 k)
 
 void gems_showBoard(u16 r)
 {
-    u16 i,j,k;
+    u16 i,j;
     r = r>0 ? GEMS_LINE - r + 1 : 0;
     for (i=0;i<8;i++)
     {
@@ -384,7 +384,7 @@ u8 gems_findBlock()
 
 u8 gems_moveExists()
 {
-    u8 i,j,a,b;
+    u8 i,j,b;
 
     for (i=0;i<8;i++)
     {
@@ -756,12 +756,12 @@ void gems_swapLeft()
 
 void gems_showHiscores()
 {
-    u8 i,d = GEMS_LINE*2+1,j;
+    u8 i,d = GEMS_LINE*2+1;
 
     ClearScreen(SCR_1_PLANE);
     ClearScreen(SCR_2_PLANE);
 
-    showImage8(GEMS_TILES,&SKULL2_IMG,CENTER,CENTER);
+    showImage(GEMS_TILES,&SKULL2_IMG,CENTER,CENTER);
 
     SL_LoadGroup(magical1,sizeof(magical1));
     SL_PlayTune(0);
@@ -820,7 +820,7 @@ void gems_play()
     SL_PlayTune(0);
 
     gems_loadGfx();
-    showImage8(GEMS_TILES,&SKULL2_IMG,3,0);
+    showImage(GEMS_TILES,&SKULL2_IMG,3,0);
     gems_drawBorders();
 
     gems_print("   HAVE FUN !   ",3,17,0);
@@ -977,8 +977,7 @@ const u8 idx[] = {110,124,138};
 
 u8 gems_mainMenu()
 {
-    u8 i,j,k,cptk,cptl,l;
-    s8 dl;
+    u8 i,j,k;
 
     ClearAll();
 
@@ -988,8 +987,8 @@ u8 gems_mainMenu()
     gems_loadSpr(420);
     gems_showHC((void*)GEMS_MENU_ID);
 
-    SetSprite(0,420,0,64,idx[k],title_palidx[0],TOP_PRIO);
     k=0;
+    SetSprite(0,420,0,64,idx[k],title_palidx[0],TOP_PRIO);
     while((((j=JOYPAD)&J_A) == 0) && ((j&J_B) == 0))
     {
         if ((j&J_DOWN)||(j&J_LEFT))
@@ -1025,7 +1024,7 @@ void gems_main()
     DATA.curimg = 0;
 
     __asm(" di");
-    VBL_INT = gems_myVBL;
+    VBL_INT = gems_myVBLinterrupt;
     __asm(" ei");
 
     while(i != 3)
