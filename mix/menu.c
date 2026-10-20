@@ -20,7 +20,7 @@ extern GAME_DATA DATA;
 
 MOVIE curmovie;
 
-void __interrupt menu_myVBL1()
+void __interrupt menu_myVBL1interrupt()
 {
     WATCHDOG = WATCHDOG_CLEAR;
     if (USR_SHUTDOWN) { SysShutdown(); while (1); }
@@ -35,7 +35,7 @@ void __interrupt menu_myVBL1()
 	}
 }
 
-void __interrupt menu_myVBL2()
+void __interrupt menu_myVBL2interrupt()
 {
     WATCHDOG = WATCHDOG_CLEAR;
     if (USR_SHUTDOWN) { SysShutdown(); while (1); }
@@ -49,14 +49,14 @@ void __interrupt menu_myVBL2()
 
 void menu_showFreePlayTech()
 {
-    u8 j, i;
+    u8 j, i = 0;
 
     DATA.curimg = 0;
     hc_load((void*)FREEPLAY_ID);
     DATA.curimg=(void*)FREEPLAY_ID;
 
     __asm(" di");
-    VBL_INT = menu_myVBL1;
+    VBL_INT = menu_myVBL1interrupt;
     __asm(" ei");
 
     while (j=JOYPAD);
@@ -111,13 +111,13 @@ u8 menu_mainMenu()
     u8 mx[3] = {40, 88, 64};
 
     DATA.curimg = 0;
-    memset(&curmovie, 0, sizeof(MOVIE));
+    memset((u8*)&curmovie, 0, sizeof(MOVIE));
 
     SL_LoadGroup(cotton1,sizeof(cotton1));
     SL_PlayTune(0);
 
     __asm(" di");
-    VBL_INT = menu_myVBL2;
+    VBL_INT = menu_myVBL2interrupt;
     __asm(" ei");
 
     ClearAll();
@@ -145,7 +145,7 @@ u8 menu_mainMenu()
 	mp_load(&curmovie);
 
     __asm(" di");
-    VBL_INT = menu_myVBL2;
+    VBL_INT = menu_myVBL2interrupt;
     __asm(" ei");
 
     i = 0;

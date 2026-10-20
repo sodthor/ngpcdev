@@ -1,7 +1,7 @@
 #include "ngpc.h"
 #include "img.h"
 
-void showImage8(u16 offset,SOD_IMG* img,u8 x,u8 y)
+void showImage(u16 offset,SOD_IMG* img,u8 x,u8 y)
 {
 	u16 i,l=img->w*img->h*8,j,o=offset*8;
 

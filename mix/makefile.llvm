@@ -1,0 +1,58 @@
+.SUFFIXES: .c .asm .ll
+NAME = MIX
+
+# LLVM C compiler — works with clang-18 and clang-22. Override: make -f makefile.llvm CC=clang-22
+CC = clang-22
+OPT ?= -O3
+
+all: ngpc.lcf $(NAME).ngp
+
+LL = \
+	main.ll \
+	menu.ll \
+	gems/gems.ll \
+	dynamate/dynabase.ll \
+	dynamate/dynamate.ll \
+	vexed/vexed.ll \
+	hicolor.ll \
+	flash.ll \
+	music.ll \
+	img.ll \
+	mplayer.ll \
+	library.ll
+
+$(NAME).asm $(NAME).inc: $(LL) ../transpiler/Ir2Tlcs900.class ../transpiler/AsmOptimizer.class
+	java -cp ../transpiler Ir2Tlcs900 $(LL) -o $(NAME).asm --data-output $(NAME).inc
+	java -cp ../transpiler AsmOptimizer $(NAME).asm -v --pre-opt-output $(NAME)_preopt.asm
+
+../transpiler/Ir2Tlcs900.class: ../transpiler/Ir2Tlcs900.java ../transpiler/AsmOptimizer.java ../transpiler/LoopRegisterAllocator.java ../transpiler/LoopRegisterAllocator.class
+	cd ../transpiler && javac Ir2Tlcs900.java
+
+../transpiler/LoopRegisterAllocator.class: ../transpiler/LoopRegisterAllocator.java ../transpiler/Ir2Tlcs900.java
+	cd ../transpiler && javac Ir2Tlcs900.java LoopRegisterAllocator.java
+
+../transpiler/AsmOptimizer.class: ../transpiler/AsmOptimizer.java
+	cd ../transpiler && javac AsmOptimizer.java
+
+$(NAME).ngp: $(NAME).asm ../transpiler/Ir2Tlcs900.class ../transpiler/AsmOptimizer.class
+	@while :; do \
+		wine ./build.bat $(NAME) > .jump-warnings.log 2>&1 || { cat .jump-warnings.log; exit 1; }; \
+		cat .jump-warnings.log; \
+		changed=$$(java -cp ../transpiler Ir2Tlcs900 --shorten-jumps-from-warnings $(NAME).asm .jump-warnings.log); \
+		[ "$$changed" -eq 0 ] && break; \
+	done
+	@rm -f .jump-warnings.log
+
+.c.ll:
+	$(CC) --target=arm-none-eabi -S $(OPT) -emit-llvm -DCLANG -I. -Imusix -fno-builtin-strlen -Wall $< -o $@
+
+$(LL): makefile.llvm .llvm-flags
+
+.PHONY: llvm-force
+llvm-force:
+
+.llvm-flags: llvm-force
+	@printf '%s\n' '$(CC) $(OPT)' | cmp -s - $@ || printf '%s\n' '$(CC) $(OPT)' > $@
+
+clean:
+	rm -f *.ll gems/*.ll dynamate/*.ll vexed/*.ll $(NAME).asm $(NAME).inc $(NAME).p $(NAME).ngp .jump-warnings.log ../transpiler/AsmOptimizer.class .llvm-flags

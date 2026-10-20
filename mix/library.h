@@ -49,6 +49,12 @@ u16 GetRandom(u16 Value);
  */
 extern volatile u8 VBCounter;
 
+#ifdef CLANG
+void memset(u8* dst, u8 value, u16 count);
+int strlen(const char * s);
+#endif
+
+void SysShutdown(void);
 
 #endif
 

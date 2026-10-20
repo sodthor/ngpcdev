@@ -7,7 +7,7 @@ volatile u8 VBCounter;
 // dummy Interrupt function used for interrupt that are currently
 // unused. To add an interrupt simply supply your own routine in the
 // InitNGPC routine in the interrupt vector table initialisation
-void __interrupt DummyFunction(void) {}
+void __interrupt DummyFunctionInterrupt(void) {}
 
 
 //////////////////////////////////////////////////////////////////////////////
@@ -15,7 +15,6 @@ void __interrupt DummyFunction(void) {}
 // Handles the default work required by the VBInterrupt (watchdog,
 // shutdown and a standard counter)
 //////////////////////////////////////////////////////////////////////////////
-void SysShutdown(); // forward reference
 void __interrupt VBInterrupt(void)
 {
    // clear the watchdog
@@ -52,24 +51,24 @@ void InitNGPC(void)
    USR_ANSWER |= 64; // set 6
 
    // install user interrupt vectors
-   SWI3_INT = DummyFunction;
-   SWI4_INT = DummyFunction;
-   SWI5_INT = DummyFunction;
-   SWI6_INT = DummyFunction;
-   RTCI_INT = DummyFunction;
+   SWI3_INT = DummyFunctionInterrupt;
+   SWI4_INT = DummyFunctionInterrupt;
+   SWI5_INT = DummyFunctionInterrupt;
+   SWI6_INT = DummyFunctionInterrupt;
+   RTCI_INT = DummyFunctionInterrupt;
    VBL_INT = VBInterrupt;
-   Z80_INT = DummyFunction;
-   HBL_INT = DummyFunction;
-   TI0_INT = DummyFunction;
-   TI1_INT = DummyFunction;
-   TI2_INT = DummyFunction;
-   TI3_INT = DummyFunction;
-   STX_INT = DummyFunction;
-   SRX_INT = DummyFunction;
-   DMA0_INT = DummyFunction;
-   DMA1_INT = DummyFunction;
-   DMA2_INT = DummyFunction;
-   DMA3_INT = DummyFunction;
+   Z80_INT = DummyFunctionInterrupt;
+   HBL_INT = DummyFunctionInterrupt;
+   TI0_INT = DummyFunctionInterrupt;
+   TI1_INT = DummyFunctionInterrupt;
+   TI2_INT = DummyFunctionInterrupt;
+   TI3_INT = DummyFunctionInterrupt;
+   STX_INT = DummyFunctionInterrupt;
+   SRX_INT = DummyFunctionInterrupt;
+   DMA0_INT = DummyFunctionInterrupt;
+   DMA1_INT = DummyFunctionInterrupt;
+   DMA2_INT = DummyFunctionInterrupt;
+   DMA3_INT = DummyFunctionInterrupt;
 
    ENABLE_INTERRUPTS;
    
@@ -93,7 +92,11 @@ void SysShutdown()
    __asm(" ldf 3");
    __asm(" add w,w");
    __asm(" add w,w");
+#ifdef CLANG
+   __asm(" ld xix,0fffe00h");
+#else
    __asm(" ld xix,0xfffe00");
+#endif
    __asm(" ld xix,(xix+w)");
    __asm(" call xix");
 }
@@ -111,7 +114,11 @@ void SysSetSystemFont()
    __asm(" ldf 3");
    __asm(" add w,w");
    __asm(" add w,w");
+#ifdef CLANG
+   __asm(" ld xix,0fffe00h");
+#else
    __asm(" ld xix, 0xfffe00");
+#endif
    __asm(" ld xix,(xix+w)");
    __asm(" call xix");
 }
@@ -458,6 +465,7 @@ void SeedRandom(void)
 // the compiler :-0
 s32 Multiply32bit(s32 Value1, s32 Value2)
 {
+#ifndef CLANG
    __ASM("  LD      XWA, (XSP+4)");
    __ASM("  LD      XBC, (XSP+8)");
    __ASM("  LD		HL,QWA");
@@ -471,6 +479,9 @@ s32 Multiply32bit(s32 Value1, s32 Value2)
    __ASM("  ADD		XHL,XWA");
 
    return __XHL;
+#else
+   return Value1 * Value2;
+#endif
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -488,3 +499,19 @@ u16 GetRandom(u16 Value)
    return (Multiply32bit(((RAND_RandomData >> 16) & RAND_MAX), Value) >> 15);
 }
 
+#ifdef CLANG
+void memset(u8* dst, u8 value, u16 count)
+{
+	int i;
+	for (i = 0; i < count; ++i)
+		dst[i] = value;
+}
+
+int strlen(const char * s)
+{
+	int i = 0;
+	while (s[i] != 0)
+		i++;
+	return i;
+}
+#endif

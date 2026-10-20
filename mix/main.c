@@ -3,6 +3,7 @@
 #include "library.h"
 #include "flash.h"
 #include "music.h"
+#include "hicolor.h"
 
 #include "gamedata.h"
 
@@ -54,7 +55,7 @@ void main()
 
     while (1)
     {
-        memset(&DATA, 0, sizeof(GAME_DATA));
+        memset((u8*)&DATA, 0, sizeof(GAME_DATA));
         switch(menu_mainMenu())
         {
             case 0: vexed_main(); break;

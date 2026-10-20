@@ -1,13 +1,20 @@
 #include "ngpc.h"
 
+void SysShutdown(void);
+
 void hc_load(void *img)
 {
+#ifdef CLANG
+/* _SCR1RAM/_SCR2RAM/_TILERAM/_SCR1PAL/_SCR2PAL/rRASV are provided by the
+ * HARDWARE.INC that the transpiler includes -- redefining them is a double def. */
+#else
 __ASM("	_SCR1RAM	equ	0x9000	");
 __ASM("	_SCR2RAM	equ	0x9800	");
 __ASM("	_TILERAM	equ	0xA000	");
 __ASM("	_SCR1PAL	equ	0x8280	");
 __ASM("	_SCR2PAL	equ	0x8300	");
 __ASM("	rRASV		equ	0x8009	");
+#endif
 __ASM("	DYN		equ	6080	");
 __ASM("	IDX		equ	14592	");
 
@@ -546,7 +553,7 @@ __ASM("	ldirw	(xde+),(xhl+)		");
 volatile u8 in_emu;
 volatile u8 detect_done;
 
-void __interrupt detectVBL()
+void __interrupt detectVBLinterrupt()
 {
 	WATCHDOG = WATCHDOG_CLEAR;
 	if (USR_SHUTDOWN) { SysShutdown(); while (1); }
@@ -571,7 +578,7 @@ void hc_detect()
 	detect_done = 1;
 	in_emu = 0;
 	__ASM(" di");
-	VBL_INT = detectVBL;
+	VBL_INT = detectVBLinterrupt;
 	__ASM(" ei");
 	while (detect_done);
 	__ASM(" di");
