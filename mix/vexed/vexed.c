@@ -225,7 +225,7 @@ void vexed_setCursorPosition(u8 x,u8 y)
     vexed_setSpritePos(0,x,y+16);
 }
 
-void __interrupt vexed_myVBL()
+void __interrupt vexed_myVBLinterrupt()
 {
     WATCHDOG = WATCHDOG_CLEAR;
     if (USR_SHUTDOWN) { SysShutdown(); while (1); }
@@ -341,9 +341,6 @@ void vexed_loadGfx()
 {
     u16 i;
     u16 *p0 = TILE_RAM;
-    u16 *p1 = SCROLL_1_PALETTE;
-    u16 *p2 = SCROLL_2_PALETTE;
-    u16 *ps = SPRITE_PALETTE;
     for (i=0;i<8;++i)
         p0[i] = 0;
     for (i=0;i<VEXED_TILES*8;i++)
@@ -585,7 +582,7 @@ void vexed_remove()
     u16 i, j, k;
     u8 b, found = 0;
     u8 board[10][8];
-    memset(board,0,80);
+    memset((u8*)board,0,80);
     // find blocks to remove
     for (i=0;i<10;++i)
     {
@@ -990,7 +987,7 @@ void vexed_main()
     ClearAll();
 
     __asm(" di");
-    VBL_INT = vexed_myVBL;
+    VBL_INT = vexed_myVBLinterrupt;
     __asm(" ei");
 
     if (vexed_showTitle())
