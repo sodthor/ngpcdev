@@ -1,30 +1,61 @@
 .SUFFIXES: .c .asm .ll
 NAME = MODE7
+ALLOCATED_NAME = $(NAME)_ALLOCATED
 
 # LLVM C compiler — works with clang-18 and clang-22. Override: make -f makefile.llvm CC=clang-22
 CC = clang-22
+OPT ?= -O3
 
 all: ngpc.lcf $(NAME).ngp
 
 LL = main.ll music.ll library.ll
 
-$(NAME).asm $(NAME).inc: $(LL) ../transpiler/Ir2Tlcs900.class
+$(NAME).asm $(NAME).inc: $(LL) ../transpiler/Ir2Tlcs900.class ../transpiler/AsmOptimizer.class
 	java -cp ../transpiler Ir2Tlcs900 $(LL) -o $(NAME).asm --data-output $(NAME).inc
+	java -cp ../transpiler AsmOptimizer $(NAME).asm -v --pre-opt-output $(NAME).preopt.asm
 
-../transpiler/Ir2Tlcs900.class: ../transpiler/Ir2Tlcs900.java
+$(ALLOCATED_NAME).asm $(ALLOCATED_NAME).inc &: $(LL) ../transpiler/Ir2Tlcs900.class ../transpiler/AsmOptimizer.class
+	java -cp ../transpiler Ir2Tlcs900 $(LL) --experimental-register-allocation update -o $(ALLOCATED_NAME).asm --data-output $(ALLOCATED_NAME).inc
+	java -cp ../transpiler AsmOptimizer $(ALLOCATED_NAME).asm -v --pre-opt-output $(ALLOCATED_NAME).preopt.asm
+
+../transpiler/Ir2Tlcs900.class: ../transpiler/Ir2Tlcs900.java ../transpiler/AsmOptimizer.java ../transpiler/LoopRegisterAllocator.java ../transpiler/LoopRegisterAllocator.class
 	cd ../transpiler && javac Ir2Tlcs900.java
 
-$(NAME).ngp: $(NAME).asm $(NAME).inc
+../transpiler/LoopRegisterAllocator.class: ../transpiler/LoopRegisterAllocator.java ../transpiler/Ir2Tlcs900.java
+	cd ../transpiler && javac Ir2Tlcs900.java LoopRegisterAllocator.java
+
+../transpiler/AsmOptimizer.class: ../transpiler/AsmOptimizer.java
+	cd ../transpiler && javac AsmOptimizer.java
+
+$(NAME).ngp $(ALLOCATED_NAME).ngp: %.ngp: %.asm %.inc
 	@while :; do \
-		wine ./build.bat $(NAME) > .jump-warnings.log 2>&1 || { cat .jump-warnings.log; exit 1; }; \
-		cat .jump-warnings.log; \
-		changed=$$(java -cp ../transpiler Ir2Tlcs900 --shorten-jumps-from-warnings $(NAME).asm .jump-warnings.log); \
+		wine ./build.bat $* > .$*.jump-warnings.log 2>&1 || { cat .$*.jump-warnings.log; exit 1; }; \
+		cat .$*.jump-warnings.log; \
+		changed=$$(java -cp ../transpiler Ir2Tlcs900 --shorten-jumps-from-warnings $*.asm .$*.jump-warnings.log) || exit 1; \
 		[ "$$changed" -eq 0 ] && break; \
 	done
-	@rm -f .jump-warnings.log
+	@rm -f .$*.jump-warnings.log
 
 .c.ll:
-	$(CC) --target=arm-none-eabi -S -O3 -Wno-implicit-function-declaration -Wno-int-conversion -emit-llvm -DCLANG $<
+	$(CC) --target=arm-none-eabi -S $(OPT) -Wall -emit-llvm -DCLANG $<
+
+$(LL): makefile.llvm .llvm-flags
+
+.PHONY: llvm-force
+llvm-force:
+
+.llvm-flags: llvm-force
+	@printf '%s\n' '$(CC) $(OPT)' | cmp -s - $@ || printf '%s\n' '$(CC) $(OPT)' > $@
+
+bench: $(NAME).ngp
+	cd ../transpiler && java -cp . sim.mode7.Mode7MotionBench ../mode7/$(NAME).ngp ../mode7/$(NAME).map --verify
+
+.PHONY: allocated bench-allocated
+allocated: $(ALLOCATED_NAME).ngp
+
+bench-allocated: $(ALLOCATED_NAME).ngp
+	cd ../transpiler && java -cp . sim.mode7.Mode7MotionBench ../mode7/$(ALLOCATED_NAME).ngp ../mode7/$(ALLOCATED_NAME).map --verify
 
 clean:
-	rm -f *.ll $(NAME).asm $(NAME).inc $(NAME).p $(NAME).ngp .jump-warnings.log
+	rm -f *.ll $(NAME).asm $(NAME).preopt.asm $(NAME).inc $(NAME).p $(NAME).ngp .jump-warnings.log .$(NAME).jump-warnings.log .llvm-flags
+	rm -f $(ALLOCATED_NAME).asm $(ALLOCATED_NAME).preopt.asm $(ALLOCATED_NAME).inc $(ALLOCATED_NAME).p $(ALLOCATED_NAME).ngp .$(ALLOCATED_NAME).jump-warnings.log

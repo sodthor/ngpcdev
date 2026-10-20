@@ -100,7 +100,7 @@ void update()
 	s32 near2Y = worldY + ((tsin[(teta + FOV_HALF) & PMASK] * NEAR) >> PSHIFT);
 	s32 fn2Y = (far2Y - near2Y) << 6;
 
-	s32 startX, startY, dX, dY, sampleX, sampleY, aX, aY;
+	s32 startX, startY, dX, dY, aX, aY;
 	u16 x, y, color;
 	register u32 acc;	/* low16 = tile0, high16 = tile1 */
 	register u16 *ty;
@@ -185,7 +185,7 @@ void setHBLTimer()
     __asm("ldb  rb3,0x03");
     __asm("ldb  rc3,0x02");
     __asm("swi  1");
-    //__asm("orb  (TRUN),0x1");
+//    __asm("orb  (TRUN),0x1");
 #endif
 }
 
@@ -200,7 +200,7 @@ void playBGM(int cur)
 	while ((j=JOYPAD)&(J_A|J_B));
 }
 
-s32 sqrt(s32 n)
+s32 squareRoot(s32 n)
 {
 	s32 b = 262144; // 512 * 512
 	s32 x = 0;
@@ -227,7 +227,7 @@ void showSprite()
 	s32 dX = sprX - worldX;
 	s32 dY = sprY - worldY;
 	s32 len = dX * dX + dY * dY;
-	s32 sql = sqrt(len);
+	s32 sql = squareRoot(len);
 	s32 farX = (sql * tcos[teta & PMASK]) >> PSHIFT;
 	s32 farY = (sql * tsin[teta & PMASK]) >> PSHIFT;
     s32 dot = (((dX * farX + dY * farY) * PMULT) / len) + PMULT - 1;
