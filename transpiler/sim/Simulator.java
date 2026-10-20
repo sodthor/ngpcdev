@@ -29,7 +29,7 @@ package sim;
  *
  * NGPC hardware reference:
  *   CPU clock : 6.144 MHz (normal gear)
- *   VBL rate  : 60 Hz  →  102,400 cycles per frame
+ *   Frame     : 515 x 199 = 102,485 cycles
  *   Interrupt vector table (in I/O register space 0x6FB8-0x6FFF):
  *     0x6FB8  SWI3    0x6FBC  SWI4    0x6FC0  SWI5    0x6FC4  SWI6
  *     0x6FC8  RTCI    0x6FCC  VBI     0x6FD0  Z80I    0x6FD4  TI0/HBI
@@ -113,7 +113,8 @@ public class Simulator {
             rom.title.isEmpty() ? "(no title)" : rom.title, rom.entryPoint, rom.data.length);
 
         // Compute cycles per VBL
-        final long cyclesPerVbl = cpuHz / vblHz;
+        final long cyclesPerVbl = (cpuHz == NgpcTiming.CPU_HZ && vblHz == VBL_HZ_DEFAULT)
+            ? NgpcTiming.CYCLES_PER_FRAME : cpuHz / vblHz;
         if (vblEnabled) {
             System.out.printf("VBL: %d Hz  (every %,d cycles at %,d Hz CPU clock)%n",
                 vblHz, cyclesPerVbl, cpuHz);
@@ -314,6 +315,7 @@ public class Simulator {
                 vblCount, (double) vblCount / vblHz);
         }
         System.out.println("Final state: " + reg);
+        System.out.println(cpu.getRamReport());
 
         if (dumpGfx) {
             dumpAndVerifyGfx(mem);

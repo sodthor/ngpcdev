@@ -73,5 +73,6 @@ public class NgpLoader {
         reg.setBank(0);
         // Maximum mode: set MAX bit in SR (bit 11) per TLCS-900/H spec
         reg.setSR(0x0800);
+        mem.setStackBase(STACK_INIT);
     }
 }

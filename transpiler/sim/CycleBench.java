@@ -72,7 +72,7 @@ public final class CycleBench {
         NgpLoader.init(rom, memory, registers);
 
         final int  romEnd       = ROM_BASE + rom.data.length;
-        final long cyclesPerVbl = CPU_HZ / VBL_HZ;
+        final long cyclesPerVbl = NgpcTiming.CYCLES_PER_FRAME;
         final long maxInstr     = 200_000_000L;
 
         // Phase 1: boot cost (reset -> stop symbol).
