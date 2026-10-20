@@ -3,18 +3,26 @@ NAME = SAMPLE
 
 # LLVM C compiler — works with clang-18 and clang-22. Override: make -f makefile.llvm CC=clang-22
 CC = clang-22
+OPT ?= -O1
 
 all: ngpc.lcf gfx.h $(NAME).ngp
 
 LL = main.ll memcpy.ll library.ll levels.ll
 
-$(NAME).asm: $(LL) ../transpiler/Ir2Tlcs900.class
+$(NAME).asm: $(LL) ../transpiler/Ir2Tlcs900.class ../transpiler/AsmOptimizer.class
 	java -cp ../transpiler Ir2Tlcs900 $(LL) -o $(NAME).asm --data-output $(NAME).inc
+	java -cp ../transpiler AsmOptimizer $(NAME).asm -v
 
-../transpiler/Ir2Tlcs900.class: ../transpiler/Ir2Tlcs900.java
+../transpiler/Ir2Tlcs900.class: ../transpiler/Ir2Tlcs900.java ../transpiler/AsmOptimizer.java ../transpiler/LoopRegisterAllocator.java ../transpiler/LoopRegisterAllocator.class
 	cd ../transpiler && javac Ir2Tlcs900.java
 
-$(NAME).ngp: $(NAME).asm
+../transpiler/LoopRegisterAllocator.class: ../transpiler/LoopRegisterAllocator.java ../transpiler/Ir2Tlcs900.java
+	cd ../transpiler && javac Ir2Tlcs900.java LoopRegisterAllocator.java
+
+../transpiler/AsmOptimizer.class: ../transpiler/AsmOptimizer.java
+	cd ../transpiler && javac AsmOptimizer.java
+
+$(NAME).ngp: $(NAME).asm ../transpiler/Ir2Tlcs900.class ../transpiler/AsmOptimizer.class
 	@while :; do \
 		wine ./build.bat $(NAME) > .jump-warnings.log 2>&1 || { cat .jump-warnings.log; exit 1; }; \
 		cat .jump-warnings.log; \
@@ -24,10 +32,18 @@ $(NAME).ngp: $(NAME).asm
 	@rm -f .jump-warnings.log
 
 .c.ll:
-	$(CC) --target=arm-none-eabi -S -O1 -Wno-implicit-function-declaration -Wno-int-conversion -emit-llvm -DCLANG $<
+	$(CC) --target=arm-none-eabi -S $(OPT) -Wall -emit-llvm -DCLANG $<
+
+$(LL): makefile.llvm .llvm-flags
+
+.PHONY: llvm-force
+llvm-force:
+
+.llvm-flags: llvm-force
+	@printf '%s\n' '$(CC) $(OPT)' | cmp -s - $@ || printf '%s\n' '$(CC) $(OPT)' > $@
 
 gfx.h: test.GIF
 	java -cp . CodeSprites test.GIF gfx.h GFX
 
 clean:
-	rm -f *.ll $(NAME).asm $(NAME).p $(NAME).ngp gfx.h
+	rm -f *.ll $(NAME).asm $(NAME).p $(NAME).ngp gfx.h ../transpiler/AsmOptimizer.class .llvm-flags

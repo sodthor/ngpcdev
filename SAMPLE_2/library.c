@@ -569,7 +569,6 @@ void BlockCopy(u8 * Dest, const u8 * Source, u16 n)
 void InstallSoundDriver(void)
 {
    u8 * pZ80RAM = Z80_RAM;
-   u8 i;
 
    // first stop the z80
    SOUNDCPU_CTRL = 0xAAAA;
@@ -592,7 +591,6 @@ void InstallSoundDriver(void)
 void InstallSounds(const SOUNDEFFECT SoundData[], u8 NumSounds)
 {
    u8 Preset;
-   u8 i;
    u8 * SFXBuff1 = (u8 *)0x7020;
    u8 * SFXBuff2 = (u8 *)0x7023;
    
