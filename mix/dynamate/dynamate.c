@@ -3,6 +3,7 @@
 #include "flash.h"
 #include "hicolor.h"
 #include "gamedata.h"
+#include "music.h"
 
 #include "dynamate/sprites.h"
 #include "dynamate/dynabase.h"
@@ -19,7 +20,7 @@ extern volatile u8 VBCounter;
 
 extern GAME_DATA DATA;
 
-void __interrupt hicolorVBL()
+void __interrupt hicolorVBLinterrupt()
 {
     u8 j;
     WATCHDOG = WATCHDOG_CLEAR;
@@ -621,7 +622,7 @@ void dynamate_main()
     ClearAll();
 
     __asm(" di");
-    VBL_INT = hicolorVBL;
+    VBL_INT = hicolorVBLinterrupt;
     __asm(" ei");
 
     while(i != 3)
