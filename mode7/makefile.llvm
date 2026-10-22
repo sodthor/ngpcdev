@@ -1,6 +1,5 @@
 .SUFFIXES: .c .asm .ll
 NAME = MODE7
-ALLOCATED_NAME = $(NAME)_ALLOCATED
 
 # LLVM C compiler — works with clang-18 and clang-22. Override: make -f makefile.llvm CC=clang-22
 CC = clang-22
@@ -11,12 +10,8 @@ all: ngpc.lcf $(NAME).ngp
 LL = main.ll music.ll library.ll
 
 $(NAME).asm $(NAME).inc: $(LL) ../transpiler/Ir2Tlcs900.class ../transpiler/AsmOptimizer.class
-	java -cp ../transpiler Ir2Tlcs900 $(LL) -o $(NAME).asm --data-output $(NAME).inc
+	java -cp ../transpiler Ir2Tlcs900 $(LL) --auto-register-allocation -o $(NAME).asm --data-output $(NAME).inc
 	java -cp ../transpiler AsmOptimizer $(NAME).asm -v --pre-opt-output $(NAME).preopt.asm
-
-$(ALLOCATED_NAME).asm $(ALLOCATED_NAME).inc &: $(LL) ../transpiler/Ir2Tlcs900.class ../transpiler/AsmOptimizer.class
-	java -cp ../transpiler Ir2Tlcs900 $(LL) --experimental-register-allocation update -o $(ALLOCATED_NAME).asm --data-output $(ALLOCATED_NAME).inc
-	java -cp ../transpiler AsmOptimizer $(ALLOCATED_NAME).asm -v --pre-opt-output $(ALLOCATED_NAME).preopt.asm
 
 ../transpiler/Ir2Tlcs900.class: ../transpiler/Ir2Tlcs900.java ../transpiler/AsmOptimizer.java ../transpiler/LoopRegisterAllocator.java ../transpiler/LoopRegisterAllocator.class
 	cd ../transpiler && javac Ir2Tlcs900.java
@@ -27,7 +22,7 @@ $(ALLOCATED_NAME).asm $(ALLOCATED_NAME).inc &: $(LL) ../transpiler/Ir2Tlcs900.cl
 ../transpiler/AsmOptimizer.class: ../transpiler/AsmOptimizer.java
 	cd ../transpiler && javac AsmOptimizer.java
 
-$(NAME).ngp $(ALLOCATED_NAME).ngp: %.ngp: %.asm %.inc
+$(NAME).ngp: %.ngp: %.asm %.inc
 	@while :; do \
 		wine ./build.bat $* > .$*.jump-warnings.log 2>&1 || { cat .$*.jump-warnings.log; exit 1; }; \
 		cat .$*.jump-warnings.log; \
@@ -50,12 +45,6 @@ llvm-force:
 bench: $(NAME).ngp
 	cd ../transpiler && java -cp . sim.mode7.Mode7MotionBench ../mode7/$(NAME).ngp ../mode7/$(NAME).map --verify
 
-.PHONY: allocated bench-allocated
-allocated: $(ALLOCATED_NAME).ngp
-
-bench-allocated: $(ALLOCATED_NAME).ngp
-	cd ../transpiler && java -cp . sim.mode7.Mode7MotionBench ../mode7/$(ALLOCATED_NAME).ngp ../mode7/$(ALLOCATED_NAME).map --verify
-
 clean:
 	rm -f *.ll $(NAME).asm $(NAME).preopt.asm $(NAME).inc $(NAME).p $(NAME).ngp .jump-warnings.log .$(NAME).jump-warnings.log .llvm-flags
-	rm -f $(ALLOCATED_NAME).asm $(ALLOCATED_NAME).preopt.asm $(ALLOCATED_NAME).inc $(ALLOCATED_NAME).p $(ALLOCATED_NAME).ngp .$(ALLOCATED_NAME).jump-warnings.log
+
