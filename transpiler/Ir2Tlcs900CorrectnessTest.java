@@ -60,6 +60,71 @@ public final class Ir2Tlcs900CorrectnessTest {
         return checkAllocated(name, body, expectedMemory, true);
     }
 
+    /**
+     * Allocate a module that also declares a global, so the region can index a
+     * {@code getelementptr ..., ptr @sym, ...} off a global base (lowered with
+     * {@code lda <reg>, _sym}). Executes the allocated + optimized forms like
+     * {@link #checkAllocated}; the global's `db` data is relocated above the code
+     * (which must sit at ROM_BASE for the executor) so the sim reads it by label.
+     * The preamble is prepended verbatim before {@code @probe}.
+     */
+    private static void checkAllocatedWithGlobals(String name, String preamble,
+            String body, byte[] expectedMemory) throws Exception {
+        String ir = preamble + "\ndefine i32 @probe() {\n" + body + "\n}\n";
+        verifyModule(name, ir);
+        var translator = new Ir2Tlcs900.Translator(ir, "probe");
+        translator.experimentalRegisterFunctions.add("probe");
+        // The executor starts PC at ROM_BASE (0x200000), so the CODE must live there.
+        // The inline `; ---- ROM constants ----` section defaults to the same org,
+        // which would overlap. Relocate the global data ABOVE the code: strip the
+        // ROM-constants block, place the code at ROM_BASE, then re-append the data
+        // under a higher org. `_blob`/`_wblob` are label-referenced (lda), so the
+        // assembler resolves them wherever placed.
+        List<String> raw = translator.translate()
+            .replaceAll("(?m)^\\s*include\\s+.*$", "").lines().collect(java.util.stream.Collectors.toList());
+        List<String> dataLines = new ArrayList<>();
+        List<String> head = new ArrayList<>();
+        int ci = raw.indexOf("; ---- ROM constants ----");
+        int cj = raw.indexOf("; ---- code ----");
+        require(cj >= 0, name + ": no code marker");
+        if (ci >= 0) {
+            // Everything between the ROM-constants marker and the code marker is data
+            // (its own `org` line included); drop the data's org, keep the `db` lines.
+            for (int k = ci + 1; k < cj; k++) {
+                String ln = raw.get(k);
+                if (ln.strip().startsWith("org")) continue;
+                if (!ln.strip().isEmpty()) dataLines.add(ln);
+            }
+            for (int k = 0; k < ci; k++) head.add(raw.get(k));
+        } else {
+            for (int k = 0; k < cj; k++) head.add(raw.get(k));
+        }
+        List<String> rebuilt = new ArrayList<>(head);
+        rebuilt.add("\torg 0200000h");
+        for (int k = cj; k < raw.size(); k++) {
+            String ln = raw.get(k);
+            if (ln.strip().equals("end")) {
+                if (!dataLines.isEmpty()) {
+                    rebuilt.add("\torg 0201000h");
+                    rebuilt.addAll(dataLines);
+                }
+                rebuilt.add(ln);
+            } else {
+                rebuilt.add(ln);
+            }
+        }
+        String assembly = String.join("\n", rebuilt) + "\n";
+        require(assembly.contains("experimental loop frame"), name + ": gate not applied");
+        require(assembly.contains("lda "), name + ": expected an lda for the global-base GEP");
+        Files.writeString(output.resolve(name + "_alloc.asm"), assembly);
+        fixtures.add(new Fixture(name + "_alloc", 32, 17, expectedMemory));
+        List<String> optimized = AsmOptimizer.runPasses(assembly.lines().toList(), false);
+        require(protectedCode(optimized).equals(protectedCode(assembly.lines().toList())),
+            name + ": protected function was rewritten");
+        Files.write(output.resolve(name + "_alloc_opt.asm"), optimized);
+        fixtures.add(new Fixture(name + "_alloc_opt", 32, 17, expectedMemory));
+    }
+
     private static String checkAllocated(String name, String body, byte[] expectedMemory,
                                          boolean compareLegacy) throws Exception {
         String ir = "define i32 @probe() {\n" + body + "\n}\n";
@@ -399,6 +464,59 @@ public final class Ir2Tlcs900CorrectnessTest {
         expected = SEED.clone();
         for (int k = 0; k < 4; k++) expected[k] = (byte) (sum >>> (8 * k));
         checkAllocated("loop_pressure", pressure.toString(), expected);
+
+        // Global-base GEP: sum a global byte array indexed by the loop counter via
+        // `getelementptr i8, ptr @blob, i32 %i`, storing the total at DATA_BASE.
+        // Exercises the lda-materialized global base + variable-index i8 stride that
+        // game-logic loops (@curmap, @driver, @map_x ...) depend on.
+        int blobSum = 3 + 5 + 7 + 11 + 13 + 17 + 19 + 23;
+        expected = SEED.clone();
+        for (int k = 0; k < 4; k++) expected[k] = (byte) (blobSum >>> (8 * k));
+        checkAllocatedWithGlobals("loop_global_gep_i8",
+            "@blob = constant [8 x i8] [i8 3, i8 5, i8 7, i8 11, i8 13, i8 17, i8 19, i8 23]",
+            """
+            entry:
+              br label %header
+            header:
+              %i = phi i32 [ 0, %entry ], [ %next, %header ]
+              %acc = phi i32 [ 0, %entry ], [ %sum, %header ]
+              %p = getelementptr inbounds nuw i8, ptr @blob, i32 %i
+              %b = load i8, ptr %p
+              %w = zext i8 %b to i32
+              %sum = add i32 %acc, %w
+              store i32 %sum, ptr inttoptr (i32 16384 to ptr)
+              %next = add i32 %i, 1
+              %again = icmp ult i32 %next, 8
+              br i1 %again, label %header, label %exit
+            exit:
+              ret i32 17
+            """, expected);
+
+        // Global-base GEP with a word stride (i16) and a variable index, to cover
+        // the index-scaling path (sla) for the global base.
+        int wblobSum = (100 & 0xFFFF) + (2000 & 0xFFFF) + (30000 & 0xFFFF) + (400 & 0xFFFF);
+        expected = SEED.clone();
+        for (int k = 0; k < 4; k++) expected[k] = (byte) (wblobSum >>> (8 * k));
+        checkAllocatedWithGlobals("loop_global_gep_i16",
+            "@wblob = constant [4 x i16] [i16 100, i16 2000, i16 30000, i16 400]",
+            """
+            entry:
+              br label %header
+            header:
+              %i = phi i32 [ 0, %entry ], [ %next, %header ]
+              %acc = phi i32 [ 0, %entry ], [ %sum, %header ]
+              %p = getelementptr inbounds nuw i16, ptr @wblob, i32 %i
+              %b = load i16, ptr %p
+              %w = zext i16 %b to i32
+              %sum = add i32 %acc, %w
+              store i32 %sum, ptr inttoptr (i32 16384 to ptr)
+              %next = add i32 %i, 1
+              %again = icmp ult i32 %next, 4
+              br i1 %again, label %header, label %exit
+            exit:
+              ret i32 17
+            """, expected);
+
         expected = SEED.clone();
         for (int k = 0; k < 4; k++) expected[k] = (byte) (20 >>> (8 * k));
         String nested = """
@@ -573,7 +691,288 @@ public final class Ir2Tlcs900CorrectnessTest {
             "ordinary helper translation differs from the default pipeline");
     }
 
-    private static void loopInstructionSelection() throws Exception {
+    private static void scratchForwarding() throws Exception {
+        List<String> diamond = List.of("\tld xix, xwa", "\tbit 2, ix", "\tjrl Z, .Lcombine",
+            "\tsla 16, xix", "\tadd xix, 0fffd0000h", ".Lcombine:", "\tor xde, xix",
+            "\tld xix, 0", "\tld xwa, 0");
+        List<String> forwarded = new ArrayList<>(diamond);
+        LoopRegisterAllocator.forwardScratchValues(forwarded);
+        require(forwarded.equals(List.of("\tbit 2, wa", "\tjrl Z, .Lcombine", "\tsla 16, xwa",
+            "\tadd xwa, 0fffd0000h", ".Lcombine:", "\tor xde, xwa", "\tld xix, 0", "\tld xwa, 0")),
+            "scratch forwarding did not preserve the color diamond");
+        List<String> bankIndependent = new ArrayList<>(diamond);
+        bankIndependent.add(1, "\tld xwa1, 0");
+        LoopRegisterAllocator.forwardScratchValues(bankIndependent);
+        require(!bankIndependent.contains("\tld xix, xwa") && bankIndependent.contains("\tld xwa1, 0"),
+            "alternate-bank scratch alias was confused with current scratch");
+        List<String> loop = new ArrayList<>(List.of("\tld xix, xwa", ".Lrepeat:", "\tadd ix, 1",
+            "\tcp ix, 3", "\tjrl C, .Lrepeat", "\tor xde, xix", "\tld xix, 0", "\tld xwa, 0"));
+        LoopRegisterAllocator.forwardScratchValues(loop);
+        require(loop.equals(List.of(".Lrepeat:", "\tadd wa, 1", "\tcp wa, 3", "\tjrl C, .Lrepeat",
+            "\tor xde, xwa", "\tld xix, 0", "\tld xwa, 0")), "scratch loop or word alias was not preserved");
+        for (String register : List.of("xbc", "xde", "xhl")) {
+            String low = register.substring(2), high = register.substring(1, 2);
+            List<String> aliases = new ArrayList<>(List.of("\tld " + register + ", xwa",
+                "\tadd " + low + ", 1", "\tor " + high + ", 2", "\tld xiy, " + register,
+                "\tld " + register + ", 0", "\tld xwa, 0"));
+            LoopRegisterAllocator.forwardScratchValues(aliases);
+            require(aliases.equals(List.of("\tadd a, 1", "\tor w, 2", "\tld xiy, xwa",
+                "\tld " + register + ", 0", "\tld xwa, 0")), "scratch byte aliases: " + register);
+        }
+        List<List<String>> rejected = new ArrayList<>();
+        for (String clobber : List.of("\tld xwa, 0", "\tld wa, 0", "\tld a, 0", "\tld w, 0",
+                "\tcp xwa, 1", "\tcall _helper", "\tunknown xde")) {
+            List<String> conflict = new ArrayList<>(diamond);
+            conflict.add(1, clobber);
+            rejected.add(conflict);
+        }
+        List<String> extraEntry = new ArrayList<>(diamond);
+        extraEntry.add(0, "\tjrl Z, .Lcombine");
+        rejected.add(extraEntry);
+        List<String> branchClobber = new ArrayList<>(diamond);
+        branchClobber.add(3, "\tld w, 0");
+        rejected.add(branchClobber);
+        rejected.add(List.of("\tld xix, xwa", "\tld ix, 0", "\tld xwa, 0", "\tor xde, xix",
+            "\tld xix, 0", "\tld xwa, 0"));
+        rejected.add(List.of("\tld xix, xwa", "\tadd xix, 1", "\tld xde, xix",
+            "\tld xix, 0", "\tld xhl, xwa", "\tld xwa, 0"));
+        rejected.add(List.of("\tld xix, xwa", "\tjrl .Lmissing", "\tor xde, xix",
+            "\tld xix, 0", "\tld xwa, 0"));
+        rejected.add(List.of("\tld xix, xwa", "\tld xde, (xix)", "\tld xix, 0", "\tld xwa, 0"));
+        for (List<String> input : rejected) {
+            List<String> unchanged = new ArrayList<>(input);
+            LoopRegisterAllocator.forwardScratchValues(unchanged);
+            require(unchanged.equals(input), "unsafe scratch lifetime was forwarded: " + input);
+        }
+        for (int initial : new int[] {0, 0x12345678, -1}) {
+            byte[] expected = new byte[1024];
+            int accumulator = initial;
+            for (int value = 0; value < 256; value++) {
+                accumulator += (value & 4) == 0 ? value : (value - 3) << 16;
+                for (int lane = 0; lane < 4; lane++)
+                    expected[value * 4 + lane] = (byte) (accumulator >>> (lane * 8));
+            }
+            String assembly = checkAllocated("loop_scratch_all_bytes_" + Integer.toUnsignedString(initial), """
+                entry:
+                  br label %header
+                header:
+                  %counter = phi i32 [ 0, %entry ], [ %next, %latch ]
+                  %accumulator = phi i32 [ INITIAL, %entry ], [ %combined, %latch ]
+                  %byte = trunc i32 %counter to i8
+                  store i8 %byte, ptr inttoptr (i32 17408 to ptr)
+                  %loaded = load i8, ptr inttoptr (i32 17408 to ptr)
+                  %color = zext i8 %loaded to i32
+                  %masked = and i32 %color, 4
+                  %test = icmp eq i32 %masked, 0
+                  br i1 %test, label %plain, label %convert
+                convert:
+                  %shifted = shl i32 %color, 16
+                  %converted = add i32 %shifted, -196608
+                  br label %latch
+                plain:
+                  br label %latch
+                latch:
+                  %encoded = phi i32 [ %color, %plain ], [ %converted, %convert ]
+                  %combined = add i32 %accumulator, %encoded
+                  %output = getelementptr i32, ptr inttoptr (i32 16384 to ptr), i32 %counter
+                  store i32 %combined, ptr %output
+                  %next = add i32 %counter, 1
+                  %again = icmp ult i32 %next, 256
+                  br i1 %again, label %header, label %exit
+                exit:
+                  ret i32 17
+                """.replace("INITIAL", Integer.toString(initial)), expected);
+            require(assembly.contains("\tbit 2, wa"), "byte color was not forwarded through scratch");
+        }
+    }
+
+        private static void bridgeInputs() throws Exception {
+            for (String scenario : List.of("acyclic", "cycle", "self")) {
+                List<LoopRegisterAllocator.Instruction> instructions = new ArrayList<>();
+                for (String name : List.of("%left", "%right", "%short"))
+                    instructions.add(new LoopRegisterAllocator.Instruction(name, "phi",
+                        name.equals("%short") ? "i16" : "i32", List.of(),
+                        List.of(new LoopRegisterAllocator.Incoming("0", "entry")), List.of()));
+                instructions.add(new LoopRegisterAllocator.Instruction(null, "store", "i32",
+                    List.of("%left", "inttoptr (i32 16384 to ptr)"), List.of(), List.of()));
+                instructions.add(new LoopRegisterAllocator.Instruction(null, "store", "i32",
+                    List.of("%right", "inttoptr (i32 16388 to ptr)"), List.of(), List.of()));
+                instructions.add(new LoopRegisterAllocator.Instruction(null, "store", "i16",
+                    List.of("%short", "inttoptr (i32 16392 to ptr)"), List.of(), List.of()));
+                instructions.add(new LoopRegisterAllocator.Instruction(null, "branch", null,
+                    List.of(), List.of(), List.of("exit")));
+                var plan = new LoopRegisterAllocator.Plan(
+                    List.of(new LoopRegisterAllocator.Block("header", instructions)), "header", "exit", List.of());
+                plan.homes.put("%left", "xbc");
+                plan.homes.put("%right", "xde");
+                plan.homes.put("%short", "xhl1");
+                List<String> lines = new ArrayList<>(List.of("\tcpu 93C141", "\tmaxmode on", "\torg 0200000h",
+                    "; experimental-loop-register-allocation", "; experimental-register-function-begin probe", "_probe:"));
+                plan.emit(lines, ".Lbridge_", (value, type, adjustment) -> {
+                    if (value.equals("%short")) lines.add("\tld wa, bc");
+                    else if (value.equals("%left")) lines.add("\tld xwa, " + (scenario.equals("self") ? "xbc" : "xde"));
+                    else lines.add("\tld xwa, " + (scenario.equals("acyclic") ? "xix"
+                        : scenario.equals("cycle") ? "xbc" : "xde"));
+                });
+                List<String> setup = lines.subList(0, lines.indexOf(".Lbridge_header:"));
+                long staged = setup.stream().filter(line -> line.startsWith("\tld (xsp+")).count();
+                require(staged == (scenario.equals("cycle") ? 3 : 1), "bridge staging count: " + scenario);
+                require(setup.indexOf("\tld wa, bc") < setup.indexOf("\tld xhl1, xwa"),
+                    "narrow bridge input was not staged before final moves");
+                lines.add("\tld xhl, 17");
+                lines.add("\tret");
+                lines.add("; experimental-register-function-end probe");
+                byte[] expected = SEED.clone();
+                int left = scenario.equals("self") ? 0x13572468 : 0x24681357;
+                int right = scenario.equals("acyclic") ? 0x10203040
+                    : scenario.equals("cycle") ? 0x13572468 : 0x24681357;
+                for (int lane = 0; lane < 4; lane++) {
+                    expected[lane] = (byte) (left >>> (lane * 8));
+                    expected[lane + 4] = (byte) (right >>> (lane * 8));
+                }
+                expected[8] = 0x68;
+                expected[9] = 0x24;
+                String name = "loop_bridge_" + scenario + "_alloc";
+                Files.write(output.resolve(name + ".asm"), lines);
+                fixtures.add(new Fixture(name, 32, 17, expected));
+                Files.write(output.resolve(name + "_opt.asm"), AsmOptimizer.runPasses(lines, false));
+                fixtures.add(new Fixture(name + "_opt", 32, 17, expected));
+            }
+        }
+
+        private static void shiftedConstants() throws Exception {
+                for (int seed : new int[] {-8, 0x1234fff8})
+                        for (int constant : new int[] {Integer.MIN_VALUE, -196608, 0, 65536, 196608, 2147418112})
+                                for (boolean commuted : new boolean[] {false, true}) {
+                                        byte[] expected = SEED.clone();
+                                        for (int index = 0; index < 16; index++) {
+                                                int result = ((seed + index) << 16) + constant;
+                                                for (int lane = 0; lane < 4; lane++)
+                                                        expected[index * 4 + lane] = (byte) (result >>> (lane * 8));
+                                        }
+                                        String assembly = checkAllocated("loop_shift_constant_" + Integer.toUnsignedString(seed)
+                                                + "_" + Integer.toUnsignedString(constant) + "_" + commuted, """
+                                                entry:
+                                                    br label %header
+                                                header:
+                                                    %counter = phi i32 [ 0, %entry ], [ %next, %header ]
+                                                    %value = add i32 %counter, SEED
+                                                    %shifted = shl i32 %value, 16
+                                                    %result = add i32 OPERANDS
+                                                    %address = getelementptr i32, ptr inttoptr (i32 16384 to ptr), i32 %counter
+                                                    store i32 %result, ptr %address
+                                                    %next = add i32 %counter, 1
+                                                    %again = icmp ult i32 %next, 16
+                                                    br i1 %again, label %header, label %exit
+                                                exit:
+                                                    ret i32 17
+                                                """.replace("SEED", Integer.toString(seed)).replace("OPERANDS", commuted
+                                                        ? constant + ", %shifted" : "%shifted, " + constant), expected);
+                                        int adjustment = (short) (constant >>> 16);
+                                        if (adjustment != 0)
+                                                require(Pattern.compile("(?m)^\\t" + (adjustment < 0 ? "sub " : "add ")
+                                                        + "(?:wa|bc|de|hl|ix|iy|iz), " + Ir2Tlcs900.fmtImm(Math.abs(adjustment))
+                                                        + "\\n\\tsla 16, x(?:wa|bc|de|hl|ix|iy|iz)$").matcher(assembly).find(),
+                                                        "shifted constant did not use a word immediate");
+                                }
+                for (String variant : List.of("extra_use", "unaligned", "different_shift", "subtraction")) {
+                        int shift = variant.equals("different_shift") ? 15 : 16;
+                        int constant = variant.equals("unaligned") ? -196607 : -196608;
+                        int shifted = 7 << shift;
+                        int result = variant.equals("subtraction") ? shifted - constant : shifted + constant;
+                        if (variant.equals("extra_use")) result ^= shifted;
+                        byte[] expected = SEED.clone();
+                        for (int lane = 0; lane < 4; lane++) expected[lane] = (byte) (result >>> (lane * 8));
+                        String assembly = checkAllocated("loop_shift_constant_guard_" + variant, """
+                                entry:
+                                    br label %header
+                                header:
+                                    %counter = phi i32 [ 0, %entry ], [ %next, %header ]
+                                    %shifted = shl i32 7, SHIFT
+                                    %converted = OP i32 %shifted, CONSTANT
+                                    RESULT
+                                    store i32 %result, ptr inttoptr (i32 16384 to ptr)
+                                    %next = add i32 %counter, 1
+                                    %again = icmp ult i32 %next, 2
+                                    br i1 %again, label %header, label %exit
+                                exit:
+                                    ret i32 17
+                                """.replace("SHIFT", Integer.toString(shift)).replace("CONSTANT", Integer.toString(constant))
+                                        .replace("OP", variant.equals("subtraction") ? "sub" : "add")
+                                        .replace("RESULT", variant.equals("extra_use") ? "%result = xor i32 %converted, %shifted"
+                                                : "%result = add i32 %converted, 0"), expected);
+                        require(assembly.contains(Ir2Tlcs900.fmtImm(constant & 0xffffffffL)),
+                                "ineligible shifted constant was folded: " + variant);
+                }
+        }
+
+        private static void loopInstructionSelection() throws Exception {
+            bridgeInputs();
+                shiftedConstants();
+        for (String home : List.of("xwa1", "xbc2", "xix", "xhl")) {
+            List<String> roundTrip = new ArrayList<>(List.of("\tld " + home + ", xwa",
+                "\tld xwa, " + home, "\tcp xwa, 16"));
+            LoopRegisterAllocator.eliminateRegisterRoundTrips(roundTrip);
+            require(roundTrip.equals(List.of("\tld " + home + ", xwa", "\tcp xwa, 16")),
+                "full-register round trip was retained: " + home);
+        }
+        for (List<String> input : List.of(
+                List.of("\tld xwa1, xwa", "\tld wa, wa1"),
+                List.of("\tld xwa1, xwa", "\tld xwa, xwa2"),
+                List.of("\tld (xsp+4), xwa", "\tld xwa, (xsp+4)"),
+                List.of("\tld xwa1, xwa", "\tadd xwa, 1", "\tld xwa, xwa1"),
+                List.of("\tld xwa1, xwa", ".Lentry:", "\tld xwa, xwa1"))) {
+            List<String> unchanged = new ArrayList<>(input);
+            LoopRegisterAllocator.eliminateRegisterRoundTrips(unchanged);
+            require(unchanged.equals(input), "unsafe register round trip was removed: " + input);
+        }
+        scratchForwarding();
+        List<String> shared = List.of("\tor xde, xix", "\tjrl .Ljoin", ".Lother:",
+            "\tor xde, xix", ".Ljoin:");
+        List<String> merged = new ArrayList<>(shared);
+        LoopRegisterAllocator.mergeCommonTails(merged);
+        require(merged.equals(List.of(".Lother:", "\tor xde, xix", ".Ljoin:")),
+            "common register tail was not shared or labels were lost");
+        for (List<String> rejected : List.of(
+                List.of("\tld (xix), de", "\tjrl .Ljoin", ".Lother:", "\tld (xix), de", ".Ljoin:"),
+                List.of("\tor xde, xix", "\tjrl NZ, .Ljoin", ".Lother:", "\tor xde, xix", ".Ljoin:"),
+                List.of("\tor xde, xix", "\tjrl .Lelse", ".Lother:", "\tor xde, xix", ".Ljoin:"),
+                List.of("\tor xde, xix", "\tjrl .Ljoin", ".Lother:", "\tor xde, xiy", ".Ljoin:"),
+                List.of("\tor xde, (xix)", "\tjrl .Ljoin", ".Lother:", "\tor xde, (xix)", ".Ljoin:"),
+                List.of("\tor xde2, xix", "\tjrl .Ljoin", ".Lother:", "\tor xde2, xix", ".Ljoin:"))) {
+            List<String> unchanged = new ArrayList<>(rejected);
+            LoopRegisterAllocator.mergeCommonTails(unchanged);
+            require(unchanged.equals(rejected), "unsafe or mismatched common tail was merged");
+        }
+                for (int width : new int[] {8, 16})
+                        for (String operation : List.of("lshr", "ashr"))
+                                for (int amount : new int[] {32 - width - 1, 32 - width, 31}) {
+                                        int shifted = operation.equals("lshr") ? -1 >>> amount : -1 >> amount;
+                                        int result = shifted & ((1 << width) - 1);
+                                        byte[] memory = SEED.clone();
+                                        for (int index = 0; index < 4; index++)
+                                                memory[index] = (byte) (result >>> (8 * index));
+                                        String assembly = checkAllocated("loop_shift_trunc_" + width + "_" + operation + "_" + amount, """
+                                                entry:
+                                                    br label %header
+                                                header:
+                                                    %counter = phi i32 [ 0, %entry ], [ %next, %header ]
+                                                    %shifted = OP i32 -1, AMOUNT
+                                                    %narrow = trunc i32 %shifted to iWIDTH
+                                                    %wide = zext iWIDTH %narrow to i32
+                                                    store i32 %wide, ptr inttoptr (i32 16384 to ptr)
+                                                    %next = add i32 %counter, 1
+                                                    %again = icmp ult i32 %next, 2
+                                                    br i1 %again, label %header, label %exit
+                                                exit:
+                                                    ret i32 17
+                                                """.replace("OP", operation).replace("AMOUNT", Integer.toString(amount))
+                                                        .replace("WIDTH", Integer.toString(width)), memory);
+                                        boolean masked = Pattern.compile("(?m)^\\tand x\\w+, "
+                                                + (width == 8 ? "0ffh" : "0ffffh") + "$").matcher(assembly).find();
+                                        require(masked == (!operation.equals("lshr") || amount < 32 - width),
+                                                "logical-shift truncation mask guard: " + width + "/" + operation + "/" + amount);
+                                }
         for (int width : new int[] {8, 16, 32})
             for (String op : List.of("add", "sub", "and", "or", "xor")) {
                 int mask = width == 32 ? -1 : (1 << width) - 1;

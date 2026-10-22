@@ -110,6 +110,8 @@ public class Ir2Tlcs900 {
         String output = null;
         String dataOutput = null;
         Set<String> experimentalRegisterFunctions = new LinkedHashSet<>();
+        boolean autoRegisterAllocation = false;
+        String registerAllocationSurvey = null;
         for (int i = 0; i < args.length; i++) {
             if ("-o".equals(args[i]) && i + 1 < args.length) {
                 output = args[++i];
@@ -119,6 +121,14 @@ public class Ir2Tlcs900 {
                 if (i + 1 >= args.length || args[i + 1].startsWith("-"))
                     throw new IllegalArgumentException("--experimental-register-allocation requires a function name");
                 experimentalRegisterFunctions.add(args[++i]);
+            } else if ("--auto-register-allocation".equals(args[i])) {
+                autoRegisterAllocation = true;
+            } else if ("--register-allocation-survey".equals(args[i]) && i + 1 < args.length) {
+                // Observation-only: run plan()/profitability() on every function and
+                // write a CSV of (function, outcome, score, reason). Does NOT change
+                // emitted code — used to calibrate the profitability threshold and to
+                // rank rejection reasons across ROMs.
+                registerAllocationSurvey = args[++i];
             } else {
                 inputs.add(args[i]);
             }
@@ -156,6 +166,8 @@ public class Ir2Tlcs900 {
 
         Translator translator = new Translator(sb.toString(), inputs.get(0).replaceAll("\\.ll$", ""));
         translator.experimentalRegisterFunctions.addAll(experimentalRegisterFunctions);
+        translator.autoRegisterAllocation = autoRegisterAllocation;
+        translator.registerAllocationSurvey = registerAllocationSurvey;
         TranslationOutput translated = dataOutput == null
             ? new TranslationOutput(translator.translate(), null)
             : translator.translate(dataOutput.replace('\\', '/'));
@@ -1374,6 +1386,15 @@ public class Ir2Tlcs900 {
         // frame; its inline asm is emitted inline but the surrounding IR is compiled.
         final boolean isRawAsm;
         boolean experimentalRegisterAllocation;
+        // True when allocation was requested by auto self-selection rather than an
+        // explicit --experimental-register-allocation name. In auto mode an
+        // unsupported or unprofitable region is a graceful decline (the caller retries
+        // with the default backend); explicitly named functions stay fatal on failure.
+        boolean autoRegisterAllocation;
+        // Survey-only sink: when non-null, the plan()/profitability() probe records a
+        // {function, outcome, score, detail} row here instead of only logging. Set by
+        // the --register-allocation-survey driver; null in normal builds.
+        java.util.function.Consumer<String[]> surveySink;
         FuncTranslator(IrFunction func, Set<String> globalNames,
                        Map<String, StructLayout> structLayouts) {
             this.func          = func;
@@ -3810,10 +3831,30 @@ public class Ir2Tlcs900 {
             List<BasicBlock> bbs = parseBody();
             LoopRegisterAllocator.Plan loopPlan = null;
             if (experimentalRegisterAllocation) {
-                loopPlan = LoopRegisterAllocator.plan(bbs);
+                try {
+                    loopPlan = LoopRegisterAllocator.plan(bbs);
+                } catch (IllegalArgumentException reject) {
+                    if (surveySink != null)
+                        surveySink.accept(new String[]{func.name(), "rejected", "",
+                            reject.getMessage() == null ? "" : reject.getMessage()});
+                    throw reject;
+                }
+                int score = loopPlan.profitability();
+                if (surveySink != null) {
+                    boolean admitted = !autoRegisterAllocation
+                        || score >= Translator.AUTO_PROFITABILITY_THRESHOLD;
+                    surveySink.accept(new String[]{func.name(),
+                        admitted ? "accepted" : "below-threshold", Integer.toString(score),
+                        loopPlan.header + "|" + loopPlan.labels.size() + "blk|"
+                            + loopPlan.frameSize + "B"});
+                }
                 System.err.println("[experimental-register-allocation] " + func.name()
                     + ": header " + loopPlan.header + ", " + loopPlan.labels.size()
-                    + " blocks, " + loopPlan.frameSize + " temporary stack bytes");
+                    + " blocks, " + loopPlan.frameSize + " temporary stack bytes"
+                    + ", profitability " + score);
+                if (autoRegisterAllocation && score < Translator.AUTO_PROFITABILITY_THRESHOLD)
+                    throw new LoopRegisterAllocator.Unprofitable(func.name() + ": profitability "
+                        + score + " below auto threshold " + Translator.AUTO_PROFITABILITY_THRESHOLD);
             }
             for (int bi = 0; bi < bbs.size(); bi++) {
                 BasicBlock bb = bbs.get(bi);
@@ -7618,6 +7659,15 @@ public class Ir2Tlcs900 {
         final String  irText;
         final String  moduleName;
         final Set<String> experimentalRegisterFunctions = new LinkedHashSet<>();
+        boolean autoRegisterAllocation = false;
+        // When set, write a per-function allocator survey CSV to this path instead
+        // of (not in addition to) relying on it to change codegen. Observation only.
+        String registerAllocationSurvey = null;
+        // Minimum profitability() for auto self-selection to allocate a function.
+        // Calibrated so the deep MODE7 `update` loop (808) is admitted with wide
+        // margin while short single-block loaders that previously regressed (<=33)
+        // fall back to the default backend. Explicitly named functions ignore this.
+        static final int AUTO_PROFITABILITY_THRESHOLD = 150;
         Translator(String irText, String moduleName) {
             this.irText     = irText;
             this.moduleName = moduleName;
@@ -7635,7 +7685,7 @@ public class Ir2Tlcs900 {
                     throw new IllegalArgumentException("experimental register-allocation function not found: " + name);
             List<String> out = new ArrayList<>();
             out.add("");
-            if (!experimentalRegisterFunctions.isEmpty())
+            if (!experimentalRegisterFunctions.isEmpty() || autoRegisterAllocation)
                 out.add("; experimental-loop-register-allocation");
             out.add("\tcpu\t93C141");
             out.add("\tmaxmode\ton");
@@ -7649,23 +7699,73 @@ public class Ir2Tlcs900 {
             // Code
             out.add("; ---- code ----");
             out.add("");
+            List<String[]> surveyRows = registerAllocationSurvey != null
+                ? new ArrayList<>() : null;
             for (IrFunction func : pr.functions) {
                 foldSextI64Idiom(func);
                 elideRedundantGlobalLoads(func);
                 boolean hasOriginalAllocas = func.body().stream()
                     .anyMatch(line -> line.contains(" alloca "));
                 if (!hasOriginalAllocas) narrowFunction(func);
+                if (surveyRows != null) {
+                    // Observation-only probe: run plan()/profitability() on every
+                    // function (as if auto) without using the result for codegen.
+                    FuncTranslator probe = new FuncTranslator(func, globalNames, pr.structLayouts);
+                    probe.experimentalRegisterAllocation = true;
+                    probe.autoRegisterAllocation = true;
+                    probe.surveySink = surveyRows::add;
+                    try {
+                        probe.translate();
+                    } catch (IllegalArgumentException | LoopRegisterAllocator.Unprofitable ignored) {
+                        // The sink already recorded the outcome before the throw.
+                    }
+                }
+                boolean explicit = experimentalRegisterFunctions.contains(func.name());
                 FuncTranslator ft = new FuncTranslator(func, globalNames, pr.structLayouts);
-                ft.experimentalRegisterAllocation = experimentalRegisterFunctions.contains(func.name());
-                List<String> fnOut = ft.translate();
-                if (!ft.experimentalRegisterAllocation) fnOut = eliminateSpills(fnOut);
+                ft.experimentalRegisterAllocation = explicit || autoRegisterAllocation;
+                ft.autoRegisterAllocation = autoRegisterAllocation && !explicit;
+                List<String> fnOut;
+                boolean allocated;
+                try {
+                    fnOut = ft.translate();
+                    allocated = ft.experimentalRegisterAllocation;
+                } catch (IllegalArgumentException | LoopRegisterAllocator.Unprofitable decline) {
+                    // Auto self-selection: an unsupported or unprofitable region reverts
+                    // to the default backend. An explicitly requested function keeps the
+                    // failure fatal so an opt-in that cannot be honored is loud.
+                    if (!ft.autoRegisterAllocation) throw decline;
+                    FuncTranslator fallback = new FuncTranslator(func, globalNames, pr.structLayouts);
+                    fnOut = fallback.translate();
+                    allocated = false;
+                }
+                if (!allocated) fnOut = eliminateSpills(fnOut);
                 fnOut = trimIsrSaves(fnOut);
-                if (ft.experimentalRegisterAllocation)
+                if (allocated)
                     out.add(AsmOptimizer.PROTECTED_BEGIN + func.name());
                 out.addAll(fnOut);
-                if (ft.experimentalRegisterAllocation)
+                if (allocated)
                     out.add(AsmOptimizer.PROTECTED_END + func.name());
                 out.add("");
+            }
+            // In auto mode the module marker is emitted eagerly; if no function was
+            // actually allocated (all declined), drop it so AsmOptimizer does not see
+            // a marker without fences and skip optimizing the whole module.
+            if (out.stream().noneMatch(l -> l.startsWith(AsmOptimizer.PROTECTED_BEGIN)))
+                out.remove("; experimental-loop-register-allocation");
+
+            if (surveyRows != null) {
+                StringBuilder csv = new StringBuilder("function,outcome,score,detail\n");
+                for (String[] r : surveyRows) {
+                    csv.append(r[0]).append(',').append(r[1]).append(',')
+                       .append(r[2]).append(',').append(r[3].replace(',', ';')).append('\n');
+                }
+                try {
+                    Files.writeString(Path.of(registerAllocationSurvey), csv.toString());
+                    System.err.println("[register-allocation-survey] wrote " + surveyRows.size()
+                        + " rows to " + registerAllocationSurvey);
+                } catch (java.io.IOException e) {
+                    System.err.println("[register-allocation-survey] write failed: " + e.getMessage());
+                }
             }
 
             out.add("");

@@ -2,16 +2,177 @@ import java.util.*;
 import java.util.regex.*;
 
 /**
- * Experimental closed-loop backend. XWA is instruction-local scratch; XHL is
+ * Experimental closed-loop backend. XWA is scratch with guarded forwarding; XHL is
  * allocatable and borrowed (saved/restored) only for memory stores.
  */
 final class LoopRegisterAllocator {
+    /**
+     * Thrown when auto self-selection declines a function because its region is
+     * accepted but not profitable enough. Distinct from the plain
+     * IllegalArgumentException raised for unsupported regions so the caller can
+     * treat both as a graceful decline while keeping real errors separable.
+     */
+    static final class Unprofitable extends RuntimeException {
+        Unprofitable(String message) { super(message); }
+    }
+
     private static final Pattern NAME = Pattern.compile("%[\\w.]+");
     private static final String[] PRIMARY = {"xde", "xbc", "xhl", "xix", "xiy", "xiz"};
     private static final String[] BANK = {"xde2", "xbc1", "xhl1", "xwa1", "xbc2", "xhl2", "xwa2", "xde1"};
     private static final List<String> SAVED = List.of(
         "xwa", "xbc", "xde", "xhl", "xix", "xiy", "xiz",
         "xbc1", "xde1", "xhl1", "xwa1", "xbc2", "xde2", "xhl2", "xwa2");
+    private static final Pattern REGISTER_TAIL = Pattern.compile(
+        "\\t(?:add|sub|and|or|xor) x(?:wa|bc|de|hl|ix|iy|iz), "
+        + "(?:x(?:wa|bc|de|hl|ix|iy|iz)(?:[12])?|[0-9]+|0[0-9a-f]+h)");
+
+    static void mergeCommonTails(List<String> lines) {
+        for (int index = lines.size() - 5; index >= 0; index--) {
+            String operation = lines.get(index);
+            String branch = lines.get(index + 1);
+            if (REGISTER_TAIL.matcher(operation).matches() && branch.startsWith("\tjrl ")
+                    && lines.get(index + 2).startsWith(".L") && lines.get(index + 2).endsWith(":")
+                    && operation.equals(lines.get(index + 3))
+                    && lines.get(index + 4).equals(branch.substring(5) + ":")) {
+                lines.remove(index);
+                lines.remove(index);
+            }
+        }
+    }
+
+    static void eliminateRegisterRoundTrips(List<String> lines) {
+        Pattern copy = Pattern.compile("\\tld (x(?:wa|bc|de|hl)(?:[12])?|x(?:ix|iy|iz)), "
+            + "(x(?:wa|bc|de|hl)(?:[12])?|x(?:ix|iy|iz))");
+        for (int index = lines.size() - 2; index >= 0; index--) {
+            Matcher first = copy.matcher(lines.get(index));
+            if (first.matches() && lines.get(index + 1).equals(
+                    "\tld " + first.group(2) + ", " + first.group(1)))
+                lines.remove(index + 1);
+        }
+    }
+
+    private static Pattern aliases(String register) {
+        String names = switch (register) {
+            case "xwa" -> "xwa|wa|w|a";
+            case "xbc" -> "xbc|bc|b|c";
+            case "xde" -> "xde|de|d|e";
+            case "xhl" -> "xhl|hl|h|l";
+            default -> register + "|" + register.substring(1);
+        };
+        return Pattern.compile("\\b(?:" + names + ")\\b");
+    }
+
+    private static boolean knownScratchInstruction(String line) {
+        return line.isEmpty() || line.startsWith(";") || line.endsWith(":")
+            || line.matches("(?:ld|add|sub|and|or|xor|sla|srl|sra|bit|cp|extz|exts|scc|push|pop) .+")
+            || line.startsWith("jrl ");
+    }
+
+    private static boolean[] registerLive(List<String> lines, List<int[]> successors, String register) {
+        Pattern references = aliases(register);
+        boolean[] live = new boolean[lines.size() + 1];
+        live[lines.size()] = true;
+        boolean changed;
+        do {
+            changed = false;
+            for (int index = lines.size() - 1; index >= 0; index--) {
+                String line = lines.get(index).strip();
+                boolean kill = line.equals("pop " + register)
+                    || line.startsWith("ld " + register + ", ")
+                        && !references.matcher(line.substring(line.indexOf(',') + 1)).find();
+                boolean read = !knownScratchInstruction(line)
+                    || !kill && !line.endsWith(":") && !line.startsWith("jrl ")
+                        && references.matcher(line).find();
+                boolean value = read;
+                if (!kill)
+                    for (int successor : successors.get(index)) value |= live[successor];
+                if (value != live[index]) {
+                    live[index] = value;
+                    changed = true;
+                }
+            }
+        } while (changed);
+        return live;
+    }
+
+    static void forwardScratchValues(List<String> lines) {
+        for (int copy = lines.size() - 1; copy >= 0; copy--) {
+            Matcher candidate = Pattern.compile("\\tld (x(?:bc|de|hl|ix|iy|iz)), xwa").matcher(lines.get(copy));
+            if (!candidate.matches()) continue;
+            String register = candidate.group(1);
+            Pattern references = aliases(register), scratchReferences = aliases("xwa");
+            Map<String, Integer> labels = new HashMap<>();
+            for (int index = 0; index < lines.size(); index++) {
+                String line = lines.get(index).strip();
+                if (line.endsWith(":")) labels.put(line.substring(0, line.length() - 1), index);
+            }
+            List<int[]> successors = new ArrayList<>();
+            boolean resolved = true;
+            for (int index = 0; index < lines.size(); index++) {
+                String line = lines.get(index).strip();
+                if (line.startsWith("jrl ")) {
+                    String branch = line.substring(4);
+                    int comma = branch.indexOf(',');
+                    String target = comma < 0 ? branch : branch.substring(comma + 1).strip();
+                    Integer destination = labels.get(target);
+                    if (destination == null) { resolved = false; break; }
+                    successors.add(comma < 0 ? new int[] {destination} : new int[] {destination, index + 1});
+                } else {
+                    successors.add(new int[] {index + 1});
+                }
+            }
+            if (!resolved) continue;
+            boolean[] live = registerLive(lines, successors, register);
+            boolean[] scratchLive = registerLive(lines, successors, "xwa");
+            Set<Integer> region = new LinkedHashSet<>();
+            Deque<Integer> pending = new ArrayDeque<>();
+            pending.add(copy + 1);
+            boolean safe = true;
+            while (!pending.isEmpty() && safe) {
+                int index = pending.removeFirst();
+                if (!live[index]) {
+                    if (scratchLive[index]) safe = false;
+                    continue;
+                }
+                if (index == lines.size() || index == copy) { safe = false; break; }
+                if (!region.add(index)) continue;
+                String line = lines.get(index).strip();
+                if (!knownScratchInstruction(line) || scratchReferences.matcher(line).find()) {
+                    safe = false;
+                    break;
+                }
+                if (references.matcher(line).find() && !line.endsWith(":")
+                        && (line.contains("(") || line.startsWith("push ") || line.startsWith("pop "))) {
+                    safe = false;
+                    break;
+                }
+                for (int successor : successors.get(index)) pending.add(successor);
+            }
+            if (!safe || region.isEmpty()) continue;
+            for (int index = 0; index < lines.size() && safe; index++) {
+                if (index == copy || region.contains(index)) continue;
+                for (int successor : successors.get(index))
+                    if (region.contains(successor)) { safe = false; break; }
+            }
+            if (!safe) continue;
+            for (int index : region) {
+                String line = lines.get(index);
+                if (line.strip().endsWith(":") || line.strip().startsWith("jrl ")) continue;
+                Matcher operands = references.matcher(line);
+                StringBuilder replacement = new StringBuilder();
+                while (operands.find()) {
+                    String alias = operands.group();
+                    String scratch = alias.equals(register) ? "xwa"
+                        : alias.equals(register.substring(1)) ? "wa"
+                        : Set.of("b", "d", "h").contains(alias) ? "w" : "a";
+                    operands.appendReplacement(replacement, scratch);
+                }
+                operands.appendTail(replacement);
+                lines.set(index, replacement.toString());
+            }
+            lines.remove(copy);
+        }
+    }
 
     record Incoming(String value, String predecessor) {}
     record Instruction(String name, String op, String type, List<String> operands,
@@ -46,8 +207,16 @@ final class LoopRegisterAllocator {
             + " to (i1|i8|i16|i32)").matcher(s);
         if (m.matches()) return new Instruction(m.group(1), m.group(2), m.group(5),
             List.of(m.group(4), m.group(3)), List.of(), List.of());
-        m = Pattern.compile("(%[\\w.]+) = getelementptr (i8|i16|i32), ptr " + value
-            + ", i32 " + value).matcher(s);
+        m = Pattern.compile("(%[\\w.]+) = getelementptr (?:inbounds )?(?:nuw )?(i8|i16|i32), ptr " + value
+            + ", i32 " + value + "(?:, align \\d+)?").matcher(s);
+        if (m.matches()) return new Instruction(m.group(1), "gep", "ptr",
+            List.of(m.group(3), m.group(4), m.group(2)), List.of(), List.of());
+        // Global-base GEP: `getelementptr <T>, ptr @sym, i32 <index>`. The base is a
+        // global symbol address (materialized with `lda <reg>, _sym`), not an SSA
+        // value with a register/stack home. The base operand keeps its `@` prefix so
+        // emit()'s gep case lowers it via lda instead of operand().
+        m = Pattern.compile("(%[\\w.]+) = getelementptr (?:inbounds )?(?:nuw )?(i8|i16|i32), ptr "
+            + "(@[\\w.]+), i32 " + value + "(?:, align \\d+)?").matcher(s);
         if (m.matches()) return new Instruction(m.group(1), "gep", "ptr",
             List.of(m.group(3), m.group(4), m.group(2)), List.of(), List.of());
         m = Pattern.compile("(%[\\w.]+) = load (i8|i16|i32), ptr " + value
@@ -185,7 +354,8 @@ final class LoopRegisterAllocator {
         final Map<String, Integer> slots = new LinkedHashMap<>();
         final Map<String, Integer> writes = new LinkedHashMap<>();
         final Map<String, Integer> uses = new LinkedHashMap<>();
-        final int scratch, copies, frameSize;
+        int scratch, copies, frameSize;
+        final int maxPhiCopies;
         int edgeNumber;
 
         Plan(List<Block> blocks, String header, String exit,
@@ -282,17 +452,87 @@ final class LoopRegisterAllocator {
                     }
                 }
             allocate();
+            int maxCopies = blocks.stream().mapToInt(b -> (int) b.instructions.stream()
+                .filter(i -> i.op.equals("phi")).count()).max().orElse(0);
+            maxPhiCopies = maxCopies;
+            layoutFrame(Set.of());
+        }
+
+        /**
+         * Pack stack slots and size the frame. Every spilled value needs a slot;
+         * so does every input, except those listed in {@code directInputs}, which the
+         * entry bridge delivers straight into a register home and never stages through
+         * the stack. The XHL store-borrow slot ({@code scratch}) and the phi parallel-copy
+         * area ({@code copies}) follow the packed slots.
+         */
+        private void layoutFrame(Set<String> directInputs) {
+            slots.clear();
             int offset = 0;
             for (String value : types.keySet())
-                if (inputs.contains(value) || homes.get(value) == null) {
+                if ((inputs.contains(value) && !directInputs.contains(value))
+                        || homes.get(value) == null) {
                     slots.put(value, offset);
                     offset += 4;
                 }
             scratch = offset;
             copies = offset + 4;
-            int maxCopies = blocks.stream().mapToInt(b -> (int) b.instructions.stream()
-                .filter(i -> i.op.equals("phi")).count()).max().orElse(0);
-            frameSize = copies + maxCopies * 4;
+            frameSize = copies + maxPhiCopies * 4;
+        }
+
+        private void reclaimDirectInputSlots(Set<String> directInputs) {
+            layoutFrame(directInputs);
+        }
+
+        /**
+         * A cheap profitability estimate for self-selection. The allocator pays a fixed
+         * per-call cost (context save/restore of the used registers, twice, plus input
+         * staging and the frame adjust) and earns back register residency for values the
+         * default backend would otherwise spill to and reload from the stack on every
+         * iteration. The score is (earned register-resident work) minus (fixed overhead),
+         * so it is positive only when the loop body has enough reusable register work to
+         * amortize the entry/exit cost.
+         *
+         * This deliberately does not use a trip count (not known statically). It is a
+         * structural proxy: body instruction count and the number of values that got a
+         * register home stand in for per-iteration register traffic, which is exactly
+         * what distinguishes a deep pressured loop (MODE7 `update`) from a short loader.
+         * Intended for logging/calibration and a future graceful-fallback driver; it does
+         * not change acceptance by itself.
+         */
+        int profitability() {
+            int bodyInstructions = 0;
+            for (Block block : blocks)
+                for (Instruction i : block.instructions)
+                    if (!i.op.equals("phi")) bodyInstructions++;
+            long registerHomes = homes.values().stream().filter(h -> h != null).distinct().count();
+            long registerResident = types.keySet().stream()
+                .filter(v -> homes.get(v) != null && !inputs.contains(v)).count();
+            long spilled = types.keySet().stream().filter(v -> homes.get(v) == null).count();
+            // Fixed cost: each saved register is a push and a pop (2), plus the staging
+            // and frame adjust roughly track the register-home count.
+            int fixedCost = 2 * (int) (registerHomes + 2) + (int) registerHomes;
+            // Earned: register-resident body work reused across iterations, minus the
+            // residual stack traffic for values that still had to spill.
+            int earned = bodyInstructions + 4 * (int) registerResident - 3 * (int) spilled;
+            return earned - fixedCost;
+        }
+
+        /**
+         * Shift a caller-argument stack reference after the frame shrank. Frame slots
+         * live at offsets below the provisional frame size and keep their packed
+         * values; any {@code (xsp+K)} with {@code K >= provisionalFrame} addresses a
+         * saved register or caller argument sitting above the frame, so it moves down
+         * by {@code shrink}. Lines without such a reference are returned unchanged.
+         */
+        private static String shiftCallerArg(String line, int provisionalFrame, int shrink) {
+            Matcher m = Pattern.compile("\\(xsp\\+(\\d+)\\)").matcher(line);
+            StringBuilder out = new StringBuilder();
+            while (m.find()) {
+                int k = Integer.parseInt(m.group(1));
+                m.appendReplacement(out, "(xsp+" + (k >= provisionalFrame ? k - shrink : k) + ")");
+            }
+            m.appendTail(out);
+            return out.toString();
         }
 
         private void connect(String a, String b) {
@@ -409,16 +649,127 @@ final class LoopRegisterAllocator {
             }
         }
 
+        /**
+         * The registers this region actually modifies and therefore must preserve.
+         * Every written value has an allocated home (PRIMARY/BANK); spilled values
+         * (home == null) live on the stack and need no register save. XWA is the
+         * allocator scratch (clobbered by load/store/compare/binary) and XHL is the
+         * borrow target for the memory-store path, so both are always included.
+         * Iterated in SAVED's canonical order so push/pop stay exact mirrors.
+         */
+        List<String> savedRegisters() {
+            Set<String> used = new LinkedHashSet<>();
+            used.add("xwa");
+            used.add("xhl");
+            for (String home : homes.values())
+                if (home != null) used.add(home);
+            List<String> result = new ArrayList<>();
+            for (String reg : SAVED) if (used.contains(reg)) result.add(reg);
+            return result;
+        }
+
         void emit(List<String> output, String prefix, InputLoader loader) {
             int start = output.size();
-            for (String reg : SAVED) output.add("\tpush " + reg);
-            output.add("\tadd xsp, -" + frameSize + "\t; experimental loop frame");
+            List<String> saved = savedRegisters();
+            // Generate each input's load exactly once: the loader caches WA residency
+            // and is not safe to invoke twice per input. Loads use a provisional arg
+            // offset (original frame + saves); if reclaiming input slots later shrinks
+            // the frame, caller-argument offsets in these loads are patched in place
+            // rather than regenerated.
+            int provisionalFrame = frameSize;
+            int argBase = provisionalFrame + 4 * saved.size();
+            Map<String, List<String>> inputLoads = new LinkedHashMap<>();
+            Map<String, String> directSources = new LinkedHashMap<>();
             for (String input : inputs) {
-                loader.load(input, types.get(input), frameSize + 4 * SAVED.size());
+                int loadStart = output.size();
+                loader.load(input, types.get(input), argBase);
                 canonical(output, "xwa", types.get(input));
-                output.add("\tld " + slot(input) + ", xwa");
+                List<String> load = new ArrayList<>(output.subList(loadStart, output.size()));
+                output.subList(loadStart, output.size()).clear();
+                inputLoads.put(input, load);
+                if (homes.get(input) != null && bits(types.get(input)) == 32 && load.size() == 1
+                        && load.get(0).startsWith("\tld xwa, ")) {
+                    String source = load.get(0).substring(9);
+                    if (source.matches("x(?:bc|de|hl)(?:[12])?|xwa[12]|x(?:ix|iy|iz)|\\(xsp\\+\\d+\\)|[0-9]+|0[0-9a-f]+h"))
+                        directSources.put(input, source);
+                }
             }
-            for (String input : inputs)
+            // A direct source stays direct only if it is not part of a swap cycle;
+            // cyclic members fall back to staging through a slot. Replay the acyclic
+            // scheduler to find the inputs that never touch the stack.
+            Set<String> directAcyclic = new LinkedHashSet<>();
+            List<String> pendingProbe = new ArrayList<>(directSources.keySet());
+            while (!pendingProbe.isEmpty()) {
+                String ready = null;
+                for (String input : pendingProbe) {
+                    String dest = homes.get(input);
+                    boolean needed = false;
+                    for (String other : pendingProbe)
+                        if (!other.equals(input) && dest.equals(directSources.get(other))) needed = true;
+                    if (!needed) { ready = input; break; }
+                }
+                if (ready == null) break;
+                directAcyclic.add(ready);
+                pendingProbe.remove(ready);
+            }
+            // Reclaim the slots of acyclic direct inputs and repack the frame. If the
+            // frame shrank, patch caller-argument offsets (>= provisional frame) in the
+            // already-generated loads so they still address the arguments correctly.
+            reclaimDirectInputSlots(directAcyclic);
+            int shrink = provisionalFrame - frameSize;
+            if (shrink != 0)
+                for (List<String> load : inputLoads.values())
+                    for (int i = 0; i < load.size(); i++)
+                        load.set(i, shiftCallerArg(load.get(i), provisionalFrame, shrink));
+            for (String reg : saved) output.add("\tpush " + reg);
+            output.add("\tadd xsp, -" + frameSize + "\t; experimental loop frame");
+            List<String> staged = new ArrayList<>();
+            for (String input : inputs) {
+                if (directSources.containsKey(input)) continue;
+                output.addAll(inputLoads.get(input));
+                output.add("\tld " + slot(input) + ", xwa");
+                staged.add(input);
+            }
+            List<String> pendingInputs = new ArrayList<>(directSources.keySet());
+            while (!pendingInputs.isEmpty()) {
+                String ready = null;
+                for (String input : pendingInputs) {
+                    String dest = homes.get(input);
+                    boolean needed = false;
+                    for (String other : pendingInputs)
+                        if (!other.equals(input) && dest.equals(directSources.get(other))) needed = true;
+                    if (!needed) { ready = input; break; }
+                }
+                if (ready == null) break;
+                if (!homes.get(ready).equals(directSources.get(ready))) {
+                    // A single register-to-register move can target the home directly,
+                    // skipping the XWA hop, but only when at least one side is in the
+                    // current (primary) register set: TLCS-900 cannot `ld` straight
+                    // between two alternate-bank registers, and `ld <reg>, (xsp+disp)`
+                    // is not a valid mode for an arbitrary 32-bit destination. Use the
+                    // patched load's source so compacted caller offsets are respected.
+                    List<String> load = inputLoads.get(ready);
+                    String home = homes.get(ready);
+                    String src = load.size() == 1 && load.get(0).startsWith("\tld xwa, ")
+                        ? load.get(0).substring(9) : null;
+                    boolean regMove = src != null && src.matches("x(?:wa|bc|de|hl|ix|iy|iz)(?:[12])?");
+                    boolean primary = Arrays.asList(PRIMARY).contains(home)
+                        || (regMove && Arrays.asList(PRIMARY).contains(src));
+                    if (regMove && primary) {
+                        output.add("\tld " + home + ", " + src);
+                    } else {
+                        output.addAll(load);
+                        output.add("\tld " + home + ", xwa");
+                    }
+                }
+                pendingInputs.remove(ready);
+            }
+            for (String input : pendingInputs) {
+                output.addAll(inputLoads.get(input));
+                output.add("\tld " + slot(input) + ", xwa");
+                staged.add(input);
+            }
+            for (String input : staged)
                 if (homes.get(input) != null) {
                     output.add("\tld xwa, " + slot(input));
                     output.add("\tld " + homes.get(input) + ", xwa");
@@ -429,6 +780,28 @@ final class LoopRegisterAllocator {
                 for (int ii = 0; ii < block.instructions.size(); ii++) {
                     Instruction instr = block.instructions.get(ii);
                     if (instr.op.equals("phi")) continue;
+                    if (instr.op.equals("shl") && instr.type.equals("i32")
+                            && instr.operands.get(1).equals("16") && uses.get(instr.name) == 1
+                            && ii + 1 < block.instructions.size()) {
+                        Instruction next = block.instructions.get(ii + 1);
+                        if (next.op.equals("add") && next.type.equals("i32")
+                                && next.operands.contains(instr.name)) {
+                            String other = next.operands.get(next.operands.get(0).equals(instr.name) ? 1 : 0);
+                            OptionalLong constant = Ir2Tlcs900.parseImmediate(other);
+                            if (constant.isPresent() && (constant.getAsLong() & 0xffff) == 0) {
+                                String dest = target(next.name);
+                                load(output, dest, instr.operands.get(0));
+                                int adjustment = (short) (constant.getAsLong() >>> 16);
+                                if (adjustment != 0)
+                                    output.add("\t" + (adjustment < 0 ? "sub " : "add ")
+                                        + dest.substring(1) + ", " + Ir2Tlcs900.fmtImm(Math.abs(adjustment)));
+                                output.add("\tsla 16, " + dest);
+                                store(output, next.name, dest);
+                                ii++;
+                                continue;
+                            }
+                        }
+                    }
                     if (instr.op.equals("and") && ii + 2 < block.instructions.size()) {
                         Instruction cmp = block.instructions.get(ii + 1);
                         Instruction br = block.instructions.get(ii + 2);
@@ -479,11 +852,14 @@ final class LoopRegisterAllocator {
             }
             output.add(prefix + "exit:");
             output.add("\tadd xsp, " + frameSize);
-            for (int i = SAVED.size() - 1; i >= 0; i--) output.add("\tpop " + SAVED.get(i));
+            for (int i = saved.size() - 1; i >= 0; i--) output.add("\tpop " + saved.get(i));
             for (int i = output.size() - 2; i >= start; i--)
                 if (output.get(i).startsWith("\tjrl ")
                         && output.get(i + 1).equals(output.get(i).substring(5) + ":"))
                     output.remove(i);
+            mergeCommonTails(output.subList(start, output.size()));
+            forwardScratchValues(output.subList(start, output.size()));
+            eliminateRegisterRoundTrips(output.subList(start, output.size()));
         }
         private String slot(String value) { return "(xsp+" + slots.get(value) + ")"; }
         private String operand(String value) {
@@ -510,6 +886,15 @@ final class LoopRegisterAllocator {
         private static void canonical(List<String> out, String reg, String type) {
             int bits = bits(type);
             if (bits < 32) out.add("\tand " + reg + ", " + Ir2Tlcs900.fmtImm((1L << bits) - 1));
+        }
+        private boolean shiftedValueFits(String value, String type) {
+            for (Block block : blocks)
+                for (Instruction instruction : block.instructions)
+                    if (value.equals(instruction.name) && instruction.op.equals("lshr")) {
+                        int amount = Integer.parseInt(instruction.operands.get(1));
+                        return bits(instruction.type) - amount <= bits(type);
+                    }
+            return false;
         }
         private void compare(List<String> out, Instruction instr) {
             String lhs = homes.get(instr.operands.get(0));
@@ -576,29 +961,52 @@ final class LoopRegisterAllocator {
                     load(out, dest, a.get(0));
                     if (!types.containsKey(a.get(0))) canonical(out, dest, a.get(1));
                     if (i.op.equals("sext")) signExtend(out, a.get(1));
-                    canonical(out, dest, i.type);
+                    if (!i.op.equals("trunc") || !shiftedValueFits(a.get(0), i.type))
+                        canonical(out, dest, i.type);
                     store(out, i.name, dest);
                 }
                 case "gep" -> {
                     int size = bits(a.get(2)) / 8;
-                    if (size == 1) {
-                        binary(out, i.name, "ptr", "add", a.get(0), a.get(1));
+                    String base = a.get(0);
+                    boolean globalBase = base.startsWith("@");
+                    if (size == 1 && !globalBase) {
+                        binary(out, i.name, "ptr", "add", base, a.get(1));
                         break;
                     }
                     String dest = target(i.name);
                     OptionalLong index = Ir2Tlcs900.parseImmediate(a.get(1));
+                    if (globalBase) {
+                        // Materialize the global symbol address, then add index*stride.
+                        // For a variable index, compute scaled index in a scratch that is
+                        // NOT dest (dest may be xwa when the result has no PRIMARY home),
+                        // then lda the base into dest and add the scratch.
+                        String sym = "_" + base.substring(1);
+                        if (index.isPresent()) {
+                            out.add("\tlda " + dest + ", " + sym);
+                            long off = index.getAsLong() * size & 0xFFFFFFFFL;
+                            if (off != 0) out.add("\tadd " + dest + ", " + Ir2Tlcs900.fmtImm(off));
+                        } else {
+                            String scratch = dest.equals("xwa") ? "xhl" : "xwa";
+                            load(out, scratch, a.get(1));
+                            if (size != 1) out.add("\tsla " + (size == 2 ? 1 : 2) + ", " + scratch);
+                            out.add("\tlda " + dest + ", " + sym);
+                            out.add("\tadd " + dest + ", " + scratch);
+                        }
+                        store(out, i.name, dest);
+                        break;
+                    }
                     if (index.isPresent()) {
-                        load(out, dest, a.get(0));
+                        load(out, dest, base);
                         out.add("\tadd " + dest + ", " + Ir2Tlcs900.fmtImm(index.getAsLong() * size & 0xFFFFFFFFL));
                     } else {
-                        if (dest.equals(operand(a.get(0))) && !dest.equals(operand(a.get(1)))) {
+                        if (dest.equals(operand(base)) && !dest.equals(operand(a.get(1)))) {
                             load(out, "xwa", a.get(1));
                             if (size != 1) out.add("\tsla " + (size == 2 ? 1 : 2) + ", xwa");
                             out.add("\tadd " + dest + ", xwa");
                         } else {
                             load(out, dest, a.get(1));
                             if (size != 1) out.add("\tsla " + (size == 2 ? 1 : 2) + ", " + dest);
-                            out.add("\tadd " + dest + ", " + operand(a.get(0)));
+                            out.add("\tadd " + dest + ", " + operand(base));
                         }
                     }
                     store(out, i.name, dest);
