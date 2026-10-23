@@ -1,6 +1,6 @@
 .SUFFIXES: .c .asm .rel .abs .gif .jpg .hh .class .java .mh .bin
 
-NAME = BOMBERMAN
+NAME = BOMBERMAN_CC900
 
 OBJS = \
 	main.rel \
@@ -13,7 +13,7 @@ OBJS = \
 	ngpc_linkkit/ngpc_linkkit.rel \
 	ngpc_linkkit/ngpc_linkkit_com.rel
 
-FLAGS =	-O3
+FLAGS =	-O3 -XF -Nb2
 
 DATA = \
 	cotton0.mh \
@@ -32,7 +32,7 @@ DATA = \
 	magical1.mh \
 	magical2.mh
 
-$(NAME).ngp: makefile ngpc.lcf $(DATA) $(OBJS)
+$(NAME).ngp: makefile clean ngpc.lcf $(DATA) $(OBJS)
 	tulink -la -o $(NAME).abs ngpc.lcf $(OBJS)
 	tuconv -Fs24 $(NAME).abs
 	s242ngp $(NAME).s24
@@ -50,7 +50,7 @@ $(NAME).ngp: makefile ngpc.lcf $(DATA) $(OBJS)
 	$(JAVAC) $<
 
 clean:
-	del *.rel
+	del *.rel ngpc_linkkit\\*.rel
 	del *.abs
 	del *.map 
 	del *.s24 

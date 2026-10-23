@@ -24,6 +24,17 @@
 	__ASM("	ld	bc,20				"); \
 	__ASM("	ldirw	(xde+),(xhl+)	"); \
 
+#ifdef CLANG
+#define WAIT_H0 \
+	__ASM("	db	0c1h,09h,80h,23h	"); \
+	__ASM("	db	0cbh,0cch,07h		"); \
+	__ASM("	db	6eh,0f7h			");
+
+#define WAIT_H1 \
+	__ASM("	db	0c1h,09h,80h,23h	"); \
+	__ASM(" db	0cbh,0cch,07h		"); \
+	__ASM("	db	66h,0f7h			");
+#else
 #define WAIT_H0 \
 	__ASM("	db	0xc1,0x09,0x80,0x23	"); \
 	__ASM("	db	0xcb,0xcc,0x07		"); \
@@ -33,15 +44,20 @@
 	__ASM("	db	0xc1,0x09,0x80,0x23	"); \
 	__ASM(" db	0xcb,0xcc,0x07		"); \
 	__ASM("	db	0x66,0xf7			");
+#endif
 
 void mp_load(void *movie)
 {
+#ifdef CLANG
+/* Hardware symbols come from HARDWARE.INC (auto-included by the transpiler). */
+#else
 __ASM("	_SCR1RAM	equ	0x9000	");
 __ASM("	_SCR2RAM	equ	0x9800	");
 __ASM("	_TILERAM	equ	0xA000	");
 __ASM("	_SCR1PAL	equ	0x8280	");
 __ASM("	_SCR2PAL	equ	0x8300	");
 __ASM("	rRASV		equ	0x8009	");
+#endif
 
 __ASM("	ld	xwa,(xsp+4)			");
 __ASM("	ld	xhl,xwa				");

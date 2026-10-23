@@ -7,7 +7,7 @@ volatile u8 VBCounter;
 // dummy Interrupt function used for interrupt that are currently
 // unused. To add an interrupt simply supply your own routine in the
 // InitNGPC routine in the interrupt vector table initialisation
-void __interrupt DummyFunction(void) {}
+void __interrupt DummyFunctionInterrupt(void) {}
 
 
 //////////////////////////////////////////////////////////////////////////////
@@ -15,7 +15,6 @@ void __interrupt DummyFunction(void) {}
 // Handles the default work required by the VBInterrupt (watchdog,
 // shutdown and a standard counter)
 //////////////////////////////////////////////////////////////////////////////
-void SysShutdown(); // forward reference
 void __interrupt VBInterrupt(void)
 {
    // clear the watchdog
@@ -52,24 +51,24 @@ void InitNGPC(void)
    USR_ANSWER |= 64; // set 6
 
    // install user interrupt vectors
-   SWI3_INT = DummyFunction;
-   SWI4_INT = DummyFunction;
-   SWI5_INT = DummyFunction;
-   SWI6_INT = DummyFunction;
-   RTCI_INT = DummyFunction;
+   SWI3_INT = DummyFunctionInterrupt;
+   SWI4_INT = DummyFunctionInterrupt;
+   SWI5_INT = DummyFunctionInterrupt;
+   SWI6_INT = DummyFunctionInterrupt;
+   RTCI_INT = DummyFunctionInterrupt;
    VBL_INT = VBInterrupt;
-   Z80_INT = DummyFunction;
-   HBL_INT = DummyFunction;
-   TI0_INT = DummyFunction;
-   TI1_INT = DummyFunction;
-   TI2_INT = DummyFunction;
-   TI3_INT = DummyFunction;
-   STX_INT = DummyFunction;
-   SRX_INT = DummyFunction;
-   DMA0_INT = DummyFunction;
-   DMA1_INT = DummyFunction;
-   DMA2_INT = DummyFunction;
-   DMA3_INT = DummyFunction;
+   Z80_INT = DummyFunctionInterrupt;
+   HBL_INT = DummyFunctionInterrupt;
+   TI0_INT = DummyFunctionInterrupt;
+   TI1_INT = DummyFunctionInterrupt;
+   TI2_INT = DummyFunctionInterrupt;
+   TI3_INT = DummyFunctionInterrupt;
+   STX_INT = DummyFunctionInterrupt;
+   SRX_INT = DummyFunctionInterrupt;
+   DMA0_INT = DummyFunctionInterrupt;
+   DMA1_INT = DummyFunctionInterrupt;
+   DMA2_INT = DummyFunctionInterrupt;
+   DMA3_INT = DummyFunctionInterrupt;
 
    ENABLE_INTERRUPTS;
    
@@ -93,7 +92,11 @@ void SysShutdown()
    __asm(" ldf 3");
    __asm(" add w,w");
    __asm(" add w,w");
+#ifdef CLANG
+   __asm(" ld xix,0fffe00h");
+#else
    __asm(" ld xix,0xfffe00");
+#endif
    __asm(" ld xix,(xix+w)");
    __asm(" call xix");
 }
@@ -104,14 +107,18 @@ void SysShutdown()
 //////////////////////////////////////////////////////////////////////////////
 void SysSetSystemFont()
 {
-   __asm(" ld ra3,3"); 
+   __asm(" ld ra3,3");
    __asm(" ld rw3,5"); // VECT_SYSFONTSET
 
    // do the system call
    __asm(" ldf 3");
    __asm(" add w,w");
    __asm(" add w,w");
+#ifdef CLANG
+   __asm(" ld xix,0fffe00h");
+#else
    __asm(" ld xix, 0xfffe00");
+#endif
    __asm(" ld xix,(xix+w)");
    __asm(" call xix");
 }
@@ -358,16 +365,13 @@ void PrintString(u8 Plane, u8 Palette, u8 XPos, u8 YPos, const char * theString)
 //      XPos - X Position (0 to 255)
 //      YPos - Y Position (0 to 255)
 //////////////////////////////////////////////////////////////////////////////
-void SetSprite(u8 SpriteNo, u16 TileNo, u8 XPos, u8 YPos, u8 PaletteNo, u8 Ctrl)
+void SetSprite(u16 SpriteNo, u16 TileNo, u16 XPos, u16 YPos, u8 PaletteNo, u16 Ctrl)
 {
-   u16 *theSprite = (u16 *)SPRITE_RAM;
-   u8  *theSpriteCol = SPRITE_COLOUR;
+   u16 *theSprite = ((u16*) SPRITE_RAM) + (SpriteNo<<1);
+   u8  *theSpriteCol = SPRITE_COLOUR + SpriteNo;
 
-   theSprite += (SpriteNo<<1);
-   theSpriteCol += SpriteNo;
-
-   *(theSprite++) = (((u16)Ctrl)<<8)|TileNo;
-   *(theSprite++) = (((u16)YPos)<<8)|XPos;
+   *(theSprite++) = (Ctrl<<8)|TileNo;
+   *theSprite = (YPos<<8)|XPos;
 
    *theSpriteCol = PaletteNo;
 }
@@ -380,13 +384,10 @@ void SetSprite(u8 SpriteNo, u16 TileNo, u8 XPos, u8 YPos, u8 PaletteNo, u8 Ctrl)
 //      XPos - X Position (0 to 255)
 //      YPos - Y Position (0 to 255)
 //////////////////////////////////////////////////////////////////////////////
-void SetSpritePosition(u8 SpriteNo, u8 XPos, u8 YPos)
+void __inline SetSpritePosition(u16 SpriteNo, u16 XPos, u16 YPos)
 {
-   u8 * theSprite = SPRITE_RAM;
-   theSprite += (SpriteNo * 4);
-
-   *(theSprite+2) = XPos;
-   *(theSprite+3) = YPos;
+   u16 * theSprite = ((u16*) SPRITE_RAM) + (SpriteNo << 1) + 1;
+   *theSprite = (YPos<<8)|XPos;
 }
 
 #define RAND_MAX 32767
@@ -416,6 +417,7 @@ void SeedRandom(u16 seed)
 // the compiler :-0
 s32 Multiply32bit(s32 Value1, s32 Value2)
 {
+#ifndef CLANG
    __ASM("  LD      XWA, (XSP+4)");
    __ASM("  LD      XBC, (XSP+8)");
    __ASM("  LD		HL,QWA");
@@ -429,6 +431,9 @@ s32 Multiply32bit(s32 Value1, s32 Value2)
    __ASM("  ADD		XHL,XWA");
 
    return __XHL;
+#else
+   return Value1 * Value2;
+#endif
 }
 #else
 #define Multiply32bit(a, b) (a * b)

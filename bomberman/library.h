@@ -9,6 +9,7 @@
 /*
  * Function Prototypes contained within the library
  */
+void SysShutdown(); // forward reference
 void InitNGPC(void);
 void InstallTileSet(const unsigned short Tiles[][8], u16 Len);
 
@@ -32,8 +33,8 @@ void PrintString(u8 Plane, u8 Palette, u8 XPos, u8 YPos, const char * theString)
 #define H_CHAIN		0x04
 #define V_CHAIN		0x02
 
-void SetSprite(u8 SpriteNo, u16 TileNo, u8 XPos, u8 YPos, u8 PaletteNo, u8 Ctrl);
-void SetSpritePosition(u8 SpriteNo, u8 XPos, u8 YPos);
+void SetSprite(u16 SpriteNo, u16 TileNo, u16 XPos, u16 YPos, u8 PaletteNo, u16 Ctrl);
+void SetSpritePosition(u16 SpriteNo, u16 XPos, u16 YPos);
 
 void SeedRandom(u16);
 u16 GetRandom(u16 Value);

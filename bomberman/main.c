@@ -238,8 +238,7 @@ const SOD_IMG presents[2] =
 
 void loadPresentGfx()
 {
-    u16 i,j,k,l,t;
-    u8 ii;
+    u16 i,j,k,l,t,ii;
     u16 *p0 = TILE_RAM;
     u16 *p2 = SCROLL_2_PALETTE;
     u16 *p3 = SPRITE_PALETTE;
@@ -281,11 +280,9 @@ void loadPresentGfx()
 
 void loadLoseGfx()
 {
-    u16 i,j,k,l,t;
-    u8 ii;
+    u16 i,j,k,l;
     u16 *p0 = TILE_RAM;
     u16 *p2 = SCROLL_2_PALETTE;
-    u16 *p3 = SPRITE_PALETTE;
 
     clearPals();
     ClearScreen(SCR_1_PLANE);
@@ -567,12 +564,12 @@ void updateBoard()
     }
 }
 
-u8 setSprite(u8 idx,u8 i)
+u8 setSprite(u16 idx,u16 i)
 {
     u16 n0,n1,t0,t1;
-    u8 x = chars[i].x-scr_x;
-    u8 y = chars[i].y-scr_y;
-    u8 flag = TOP_PRIO;
+    u16 x = chars[i].x-scr_x;
+    u16 y = chars[i].y-scr_y;
+    u16 flag = TOP_PRIO;
 
     n0 = (chars[i].anim<<1);
 
@@ -651,9 +648,9 @@ u8 setSprite(u8 idx,u8 i)
 void setMainSprite(u8 n,u8 i,u8 duel)
 {
     u16 n0,n1,t0,t1;
-    u8 x = chars[i].x-scr_x;
-    u8 y = chars[i].y-scr_y;
-    u8 mask = 0;
+    u16 x = chars[i].x-scr_x;
+    u16 y = chars[i].y-scr_y;
+    u16 mask = 0;
 
     if (chars[i].alive==1)
     {
@@ -1319,16 +1316,16 @@ void doPresent()
     u8 i,j;
 
     SCR1_Y = 50;
-    SCR1_X = (lvl&1) ? -16 : 10 ;
+    SCR1_X = (lvl&1) ? 256-16 : 10;
     SCR2_Y = 0;
-    SCR2_X = (lvl&1) ? -160 : 100;
+    SCR2_X = (lvl&1) ? 256-160 : 100;
     clearSprites(0);
     loadPresentGfx();
 
     print("LEVEL",2,3);
     printi(lvl+1,14,3);
 
-    for (i=0;i<50 & !((j=JOYPAD)&J_A);i++)
+    for (i=0;i<50 && !((j=JOYPAD)&J_A);i++)
     {
         Sleep(1);
         SCR1_Y-=2;
@@ -1450,8 +1447,7 @@ void youWin()
 
 void game()
 {
-    u8 i,j,n;
-    u16 t,s;
+    u16 i,j,n,t,s;
 
     lives = 3;
     score = 0;
@@ -1580,7 +1576,7 @@ void game()
         flash(data);
 }
 
-void __interrupt myVBL()
+void __interrupt myVBLinterrupt()
 {
     WATCHDOG = WATCHDOG_CLEAR;
     if (USR_SHUTDOWN) { SysShutdown(); while (1); }
@@ -1617,9 +1613,8 @@ void __interrupt myVBL()
 
 u8 menu()
 {
-    u16 i,j,k,l;
+    u16 i,j,k,l,x,y;
     s16 dl = 2, seed = 0;
-    u8 x,y;
 
     loadMenuGfx();
     print("CONTINUE",3,6);
@@ -1698,7 +1693,7 @@ u8 theirBuffer[8];
 u8 host0;
 
 u8 initLink() {
-    u8 iLoop, seed0 = GetRandom(255) & 0xff, seed1;
+    u8 seed0 = GetRandom(255) & 0xff, seed1;
     u8 ReadyHost=0;
     u8 ReadyClient=0;
 
@@ -1875,8 +1870,7 @@ void duelGame()
     u8 lastRemoteBombSeq = 0;  /* last remote bomb-seq value we have already placed   */
 
     u8 newLinkState;
-    u8 j, n, host0 = ngpc_linkkit_role() == LINKKIT_ROLE_HOST ? 1 : 0;
-
+    u8 host0 = ngpc_linkkit_role() == LINKKIT_ROLE_HOST ? 1 : 0;
     u8 loop = 0;
 
     lvl = 0;
@@ -1887,7 +1881,7 @@ void duelGame()
 
     playNextTune();
     loadGfx();
-    duelInitMap(host0);
+    duelInitMap();
     loadPals();
     duelInitChars(host0);
     clearSprites(0);
@@ -2033,7 +2027,7 @@ void main()
     paused = 1;
 
     __asm(" di");
-    VBL_INT = myVBL;
+    VBL_INT = myVBLinterrupt;
     __asm(" ei");
 
     showIntro();

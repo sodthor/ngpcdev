@@ -6,6 +6,11 @@ u8 data[256];
 
 void flash(void *data)
 {
+#ifdef CLANG
+	__ASM("SAVEOFFSET	EQU	1e0000h");
+	__ASM("BLOCK_NB		EQU	30");
+	/* VECT_FLASHWRITE/VECT_FLASHERS/rWDCR/WD_CLR are in SYSTEM.INC/HARDWARE.INC. */
+#else
 	__ASM("SAVEOFFSET	EQU	0x1e0000");
 
 	__ASM("BLOCK_NB		EQU	30");
@@ -13,6 +18,7 @@ void flash(void *data)
 	__ASM("VECT_FLASHERS	EQU	8");
 	__ASM("rWDCR		EQU	0x6f");
 	__ASM("WD_CLR		EQU	0x4e");
+#endif
 
 	// Erase block first (mandatory) : 64kb for only 256 bytes
 	__ASM("	ld	ra3,0");
