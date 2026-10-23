@@ -219,8 +219,11 @@ final class LoopRegisterAllocator {
             + "(@[\\w.]+), i32 " + value + "(?:, align \\d+)?").matcher(s);
         if (m.matches()) return new Instruction(m.group(1), "gep", "ptr",
             List.of(m.group(3), m.group(4), m.group(2)), List.of(), List.of());
-        m = Pattern.compile("(%[\\w.]+) = load (i8|i16|i32), ptr " + value
-            + "(?:, align \\d+)?").matcher(s);
+        // load (possibly volatile) from a %reg/inttoptr/constant address, or directly
+        // from a global symbol (@sym). Each admitted load is emitted in place;
+        // optimizer compatibility is checked by assembled execution regressions.
+        m = Pattern.compile("(%[\\w.]+) = load (?:volatile )?(i8|i16|i32), ptr "
+            + "(@[\\w.]+|%[\\w.]+|-?\\d+|inttoptr \\(i32 -?\\d+ to ptr\\))(?:, align \\d+)?").matcher(s);
         if (m.matches()) return new Instruction(m.group(1), "load", m.group(2),
             List.of(m.group(3)), List.of(), List.of());
         m = Pattern.compile("store (i8|i16|i32) " + value + ", ptr " + value
@@ -496,8 +499,8 @@ final class LoopRegisterAllocator {
          * structural proxy: body instruction count and the number of values that got a
          * register home stand in for per-iteration register traffic, which is exactly
          * what distinguishes a deep pressured loop (MODE7 `update`) from a short loader.
-         * Intended for logging/calibration and a future graceful-fallback driver; it does
-         * not change acceptance by itself.
+         * Auto mode uses this heuristic with its admission threshold. It is not a
+         * measured cost comparison or a guarantee that an accepted loop is faster.
          */
         int profitability() {
             int bodyInstructions = 0;
@@ -871,6 +874,12 @@ final class LoopRegisterAllocator {
             return Ir2Tlcs900.fmtImm(Long.parseLong(value) & 0xFFFFFFFFL);
         }
         private void load(List<String> out, String reg, String value) {
+            // A global symbol address is materialized with lda (it is not an inline
+            // operand); everything else resolves through operand().
+            if (value.startsWith("@")) {
+                out.add("\tlda " + reg + ", _" + value.substring(1));
+                return;
+            }
             String source = operand(value);
             if (!reg.equals(source)) out.add("\tld " + reg + ", " + source);
         }
@@ -986,11 +995,14 @@ final class LoopRegisterAllocator {
                             long off = index.getAsLong() * size & 0xFFFFFFFFL;
                             if (off != 0) out.add("\tadd " + dest + ", " + Ir2Tlcs900.fmtImm(off));
                         } else {
-                            String scratch = dest.equals("xwa") ? "xhl" : "xwa";
-                            load(out, scratch, a.get(1));
-                            if (size != 1) out.add("\tsla " + (size == 2 ? 1 : 2) + ", " + scratch);
+                            boolean borrowXhl = dest.equals("xwa");
+                            String indexRegister = borrowXhl ? "xhl" : "xwa";
+                            if (borrowXhl) out.add("\tld (xsp+" + scratch + "), xhl");
+                            load(out, indexRegister, a.get(1));
+                            if (size != 1) out.add("\tsla " + (size == 2 ? 1 : 2) + ", " + indexRegister);
                             out.add("\tlda " + dest + ", " + sym);
-                            out.add("\tadd " + dest + ", " + scratch);
+                            out.add("\tadd " + dest + ", " + indexRegister);
+                            if (borrowXhl) out.add("\tld xhl, (xsp+" + scratch + ")");
                         }
                         store(out, i.name, dest);
                         break;

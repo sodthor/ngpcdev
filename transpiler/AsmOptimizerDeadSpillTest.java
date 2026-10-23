@@ -17,7 +17,65 @@ public final class AsmOptimizerDeadSpillTest {
         if (present == removed) throw new AssertionError(name);
     }
 
+    private static void extendedAluFolds() {
+        for (String operation : List.of("add", "adc", "sub", "sbc", "and", "or", "xor")) {
+            List<String> roundtrip = fixture("\tld xhl, xwa", "\tld xwa, (xsp+12)",
+                "\t" + operation + " xhl, xwa", "\tld xwa, xhl", "\tld xhl, 0");
+            List<String> expected = fixture("\t" + operation + " xwa, (xsp+12)", "\tld xhl, 0");
+            if (!AsmOptimizer.foldXhlLoadAddRoundtrip(roundtrip).equals(expected))
+                throw new AssertionError("ordered roundtrip fold: " + operation);
+            List<String> live = new ArrayList<>(roundtrip);
+            live.set(6, "\tld xde, xhl");
+            if (!AsmOptimizer.foldXhlLoadAddRoundtrip(live).equals(live))
+                throw new AssertionError("live XHL must prevent roundtrip fold: " + operation);
+            for (String accumulator : List.of("wa", "xwa")) {
+                String destination = accumulator.equals("wa") ? "de" : "xde";
+                List<String> reload = fixture("\tld " + accumulator + ", (xsp+12)",
+                    "\t" + operation + " " + destination + ", " + accumulator, "\tld xwa, 0");
+                List<String> direct = fixture("\t" + operation + " " + destination + ", (xsp+12)",
+                    "\tld xwa, 0");
+                if (!AsmOptimizer.foldReloadIntoAluMemOperand(reload).equals(direct))
+                    throw new AssertionError("memory operand fold: " + operation + " " + accumulator);
+                List<String> self = fixture("\tld " + accumulator + ", (xsp+12)",
+                    "\t" + operation + " " + accumulator + ", " + accumulator, "\tld xwa, 0");
+                if (!AsmOptimizer.foldReloadIntoAluMemOperand(self).equals(self))
+                    throw new AssertionError("loaded accumulator is also the left operand: " + operation + " " + accumulator);
+            }
+        }
+        for (String operation : List.of("add", "and", "or", "xor", "sub", "sbc", "adc")) {
+            List<String> spill = fixture("\tld (xsp+8), xwa", "\tld xwa, (xsp+12)",
+                "\t" + operation + " xwa, (xsp+8)", "\tld xde, (xsp+8)");
+            List<String> expected = List.of("add", "and", "or", "xor").contains(operation)
+                ? fixture("\tld (xsp+8), xwa", "\t" + operation + " xwa, (xsp+12)", "\tld xde, (xsp+8)")
+                : spill;
+            if (!AsmOptimizer.foldSpillReloadAdd(spill).equals(expected))
+                throw new AssertionError("commutative spill fold: " + operation);
+            for (String barrier : List.of("\tand xwa, 1", "\tadc xwa, 0", ".Lentry:", "\tpush xde")) {
+                List<String> blocked = new ArrayList<>(spill);
+                blocked.add(4, barrier);
+                if (!AsmOptimizer.foldSpillReloadAdd(blocked).equals(blocked))
+                    throw new AssertionError("spill fold barrier: " + operation + " " + barrier);
+            }
+        }
+        System.out.println("Extended ALU folds: PASS");
+    }
+
     public static void main(String[] args) {
+        extendedAluFolds();
+        for (String middle : List.of("\tand xwa, 1", "\tsub xwa, 1", "\tadc xwa, 0",
+                "\tsrl 1, xwa", "\tcustom xwa")) {
+            List<String> original = fixture("\tld (xsp+8), xwa", "\tld xwa, (xsp+12)",
+                middle, "\tadd xwa, (xsp+8)");
+            if (!AsmOptimizer.foldSpillReloadAdd(original).equals(original))
+                throw new AssertionError("spill addition must not move across " + middle);
+        }
+        List<String> adjacent = fixture("\tld (xsp+8), xwa", "\tld xwa, (xsp+12)",
+            "\tadd xwa, (xsp+8)", "\tjr .Lread", ".Lread:", "\tld xde, (xsp+8)");
+        List<String> folded = AsmOptimizer.foldSpillReloadAdd(adjacent);
+        if (!folded.contains("\tld (xsp+8), xwa") || !folded.contains("\tadd xwa, (xsp+12)")
+                || folded.contains("\tadd xwa, (xsp+8)"))
+            throw new AssertionError("adjacent fold must preserve the spill for successor reads");
+        System.out.println("Spill addition reassociation: PASS (6 cases)");
         List<String> maskedBranch = List.of("_test:", "\tcp xwa, 020000h", "\tscc C, a",
             "\tand wa, 0ffh", "\tor a, a", "\tjrl NZ, .Linside",
             "\tld xwa, xde", "\tor xwa, 3", "\tret", ".Linside:",

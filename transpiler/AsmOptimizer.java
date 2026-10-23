@@ -61,11 +61,14 @@ public class AsmOptimizer {
             return new ArrayList<>(lines);
         }
         if (!protectedFunctions(lines).isEmpty())
-            System.err.println("[AsmOptimizer] optimizing legacy code; experimental functions remain protected");
-        record Pass(String name, java.util.function.UnaryOperator<List<String>> fn) {}
+            System.err.println("[AsmOptimizer] optimizing legacy code and global passes inside experimental functions");
+        // global=true includes fenced functions; locality alone does not establish semantic safety.
+        record Pass(String name, java.util.function.UnaryOperator<List<String>> fn, boolean global) {
+            Pass(String name, java.util.function.UnaryOperator<List<String>> fn) { this(name, fn, false); }
+        }
         List<Pass> passes = List.of(
             new Pass("removeUnreferencedLabels[1]",  AsmOptimizer::removeUnreferencedLabels),
-            new Pass("peepholeEliminate",            AsmOptimizer::peepholeEliminate),
+            new Pass("peepholeEliminate",            AsmOptimizer::peepholeEliminate, true),
             new Pass("eliminateRedundantRegReload",  AsmOptimizer::eliminateRedundantRegReload),
             new Pass("foldAddSubToIncDec",           AsmOptimizer::foldAddSubToIncDec),
             new Pass("foldImmLoadThroughAcc",        AsmOptimizer::foldImmLoadThroughAcc),
@@ -91,12 +94,17 @@ public class AsmOptimizer {
             new Pass("foldReloadIntoAluMemOperand",  AsmOptimizer::foldReloadIntoAluMemOperand),
             new Pass("foldPushImmediate",            AsmOptimizer::foldPushImmediate),
             new Pass("simplifyZeroCompareBranches",  AsmOptimizer::simplifyZeroCompareBranches),
-            new Pass("foldStackLoadMovePairs",       AsmOptimizer::foldStackLoadMovePairs),
+            new Pass("foldStackLoadMovePairs",       AsmOptimizer::foldStackLoadMovePairs, true),
             new Pass("removeRedundantOrAfterAnd",    AsmOptimizer::removeRedundantOrAfterAndForZeroBranch),
             new Pass("removeUnreferencedLabels[2]",  AsmOptimizer::removeUnreferencedLabels),
             new Pass("eliminateRedundantRegLoads",   AsmOptimizer::eliminateRedundantRegLoads),
             new Pass("removeUnusedFrame",            AsmOptimizer::removeUnusedFrame),
-            new Pass("foldXhlAccumulatorRoundtrip",  AsmOptimizer::foldXhlAccumulatorRoundtrip),
+            new Pass("foldXhlAccumulatorRoundtrip",  AsmOptimizer::foldXhlAccumulatorRoundtrip, true),
+            new Pass("eliminateRegisterRoundtrip",   AsmOptimizer::eliminateRegisterRoundtrip, true),
+            new Pass("foldXhlLoadAddRoundtrip",      AsmOptimizer::foldXhlLoadAddRoundtrip, true),
+            new Pass("foldSpillReloadAdd",           AsmOptimizer::foldSpillReloadAdd, true),
+            new Pass("foldXhlImmAddToMem",           AsmOptimizer::foldXhlImmAddToMem, true),
+            new Pass("invertCondJumpPair",           AsmOptimizer::invertCondJumpPair, true),
             new Pass("foldColorAndBitTestToRegBit[2]", AsmOptimizer::foldColorAndBitTestToRegBit),
             new Pass("eliminateDeadPhiOutputStores[2]", AsmOptimizer::eliminateDeadPhiOutputStores),
             new Pass("eliminateOverwrittenSpills", AsmOptimizer::eliminateOverwrittenSpills),
@@ -113,7 +121,9 @@ public class AsmOptimizer {
             int before = lines.size();
             lines = p.name().startsWith("removeUnreferencedLabels")
                 ? removeLabelsOutsideProtected(lines, p.fn())
-                : optimizeUnprotected(lines, p.fn());
+                : p.global()
+                    ? p.fn().apply(lines)
+                    : optimizeUnprotected(lines, p.fn());
             if (verbose && lines.size() != before) {
                 System.err.printf("[AsmOptimizer] %-40s %d → %d (-%d)%n",
                         p.name(), before, lines.size(), before - lines.size());
@@ -217,7 +227,7 @@ public class AsmOptimizer {
     // =========================================================================
     static List<String> peepholeEliminate(List<String> lines) {
         Map<String, Integer> refCount = new HashMap<>();
-        Pattern pJrl    = Pattern.compile("^\\s+jrl\\s+(\\.Lbb_\\S+)\\s*$");
+        Pattern pJrl    = Pattern.compile("^\\s+jrl?\\s+(\\.Lbb_\\S+)\\s*$");
         Pattern pLabel  = Pattern.compile("^(\\.Lbb_\\S+):.*$");
         Pattern pAnyRef = Pattern.compile("(?<![\\w.])(\\.Lbb_\\w+)");
         for (String line : lines) {
@@ -720,17 +730,36 @@ public class AsmOptimizer {
     }
 
     // =========================================================================
+    // Helper: word/dword register test for the logical mem-source size guard.
+    // Byte registers are a single letter a..l, optionally bank-suffixed
+    // (a, b1, l2, ...). Everything else the ALU regex admits (wa.., bc.., x..)
+    // is word or dword width, where the sim decodes logical R,(mem) forms.
+    // =========================================================================
+    private static final Pattern BYTE_REG =
+        Pattern.compile("^[a-l]\\d?$", Pattern.CASE_INSENSITIVE);
+
+    static boolean isWordOrDwordReg(String reg) {
+        return !BYTE_REG.matcher(reg).matches();
+    }
+
+    // =========================================================================
     // Pass: foldReloadIntoAluMemOperand
     //
     // ld xwa,(xsp+N) ; add R, xwa  →  add R, (xsp+N)  (drop the reload)
     // Ported from Ir2Tlcs900.java.
+    //
+    // Covers both the arithmetic (add/adc/sub/sbc) and logical (and/or/xor)
+    // R,(mem) source forms. Operand order is preserved (R OP xwa → R OP (mem)),
+    // so this fold does not rely on commutativity. The logical R,(mem) forms
+    // exist on TLCS-900 (word/dword prefix, op2 0xC0/0xD0/0xE0) and the sim
+    // decodes them for msz>=2 — see memory [[mode7-logical-mem-operand-alu]].
     // =========================================================================
     static List<String> foldReloadIntoAluMemOperand(List<String> lines) {
         Pattern pLoad = Pattern.compile(
             "^\\s+ld\\s+(xwa|wa),\\s*(\\(xsp\\+(\\d+)\\))\\s*(?:;.*)?$",
             Pattern.CASE_INSENSITIVE);
         Pattern pAlu = Pattern.compile(
-            "^\\s+(add|adc|sub|sbc)\\s+(x?[a-z]+\\d?),\\s*(xwa|wa)\\s*(?:;.*)?$",
+            "^\\s+(add|adc|sub|sbc|and|or|xor)\\s+(x?[a-z]+\\d?),\\s*(xwa|wa)\\s*(?:;.*)?$",
             Pattern.CASE_INSENSITIVE);
         Pattern pLabel = Pattern.compile("^[.\\w].*:.*$");
         Pattern pTouchesAcc = Pattern.compile(
@@ -764,6 +793,16 @@ public class AsmOptimizer {
 
                 Matcher mAlu = pAlu.matcher(core);
                 if (mAlu.matches() && mAlu.group(3).equalsIgnoreCase(acc)) {
+                    // The logical R,(mem) source forms are decoded by the sim
+                    // only at word/dword size (msz>=2); a byte-size logical
+                    // mem-source uses the 8F prefix shared with bit-ops/JP and
+                    // must not be emitted. Restrict and/or/xor to word (wa..)
+                    // or dword (x..) destinations. Arithmetic ops are unaffected.
+                    String aluOp  = mAlu.group(1).toLowerCase(Locale.ROOT);
+                    String aluDst = mAlu.group(2).toLowerCase(Locale.ROOT);
+                    if (registerAliases(acc).contains(aluDst)) { bail = true; break; }
+                    boolean logical = aluOp.equals("and") || aluOp.equals("or") || aluOp.equals("xor");
+                    if (logical && !isWordOrDwordReg(aluDst)) { bail = true; break; }
                     consumerAt = j; break;
                 }
                 if (pStackDisturb.matcher(core).find()) { bail = true; break; }
@@ -1002,7 +1041,7 @@ public class AsmOptimizer {
                                               Pattern.CASE_INSENSITIVE);
         Pattern pLdFromWa   = Pattern.compile("^\\s+ld\\s+(hl|bc|de),\\s*wa\\s*(?:;.*)?$",
                                               Pattern.CASE_INSENSITIVE);
-        Pattern pLdFromXwa  = Pattern.compile("^\\s+ld\\s+(xhl|xbc|xde),\\s*xwa\\s*(?:;.*)?$",
+        Pattern pLdFromXwa  = Pattern.compile("^\\s+ld\\s+(xhl|xbc|xde|xiz|xiy|xix),\\s*xwa\\s*(?:;.*)?$",
                                               Pattern.CASE_INSENSITIVE);
         Pattern pLabel = Pattern.compile("^[.\\w].*:.*$");
 
@@ -3635,6 +3674,318 @@ public class AsmOptimizer {
             if (alias.matcher(instruction).find()) return false;
         }
         return false;
+    }
+
+    // =========================================================================
+    // Pass: eliminateRegisterRoundtrip  (Rule A)
+    //
+    //   ld xDeN, xwa          <- saves xwa into a bank/index reg
+    //   ld xwa, xDeN          <- immediately reloads it back (no-op: xwa unchanged)
+    //
+    // Only fires when save and reload are consecutive (no instructions between them,
+    // only blank lines or comments).  This is the safe conservative form: xwa is
+    // guaranteed unchanged because no instruction executed between the two moves.
+    // =========================================================================
+    static List<String> eliminateRegisterRoundtrip(List<String> lines) {
+        // Matches:  ld xDeN, xwa  (bank/index reg on the left, xwa on the right)
+        Pattern pSaveXwa = Pattern.compile(
+            "^(\\s+)ld\\s+(x(?:de|bc|hl|wa|iz|iy|ix)[0-9]?),\\s*xwa\\s*(?:;.*)?$",
+            Pattern.CASE_INSENSITIVE);
+        // Matches:  ld xwa, xDeN  (xwa on the left, same bank/index reg on the right)
+        Pattern pReloadXwa = Pattern.compile(
+            "^\\s+ld\\s+xwa,\\s*(x(?:de|bc|hl|wa|iz|iy|ix)[0-9]?)\\s*(?:;.*)?$",
+            Pattern.CASE_INSENSITIVE);
+
+        List<String> out = new ArrayList<>(lines);
+        for (int i = 0; i < out.size(); i++) {
+            if (out.get(i) == null) continue;
+            Matcher mSave = pSaveXwa.matcher(out.get(i));
+            if (!mSave.matches()) continue;
+            String reg = mSave.group(2).toLowerCase(Locale.ROOT);  // e.g. "xde1"
+            // Find the very next non-blank/non-comment line
+            int j = i + 1;
+            while (j < out.size()) {
+                if (out.get(j) == null) { j++; continue; }
+                String raw = out.get(j);
+                if (raw.matches("^\\s*(;.*)?$")) { j++; continue; }
+                break;
+            }
+            if (j >= out.size()) continue;
+            // The very next instruction must be the reload ld xwa, same-reg
+            Matcher mReload = pReloadXwa.matcher(out.get(j));
+            if (!mReload.matches()) continue;
+            if (!mReload.group(1).equalsIgnoreCase(reg)) continue;
+            // Safe: save immediately followed by reload — xwa is unchanged, drop reload
+            out.set(j, null);
+        }
+        out.removeIf(Objects::isNull);
+        return out;
+    }
+
+    // =========================================================================
+    // Pass: foldXhlLoadAddRoundtrip  (Rule C)
+    //
+    //   ld xhl, xwa            <- save xwa in xhl
+    //   ld xwa, (xsp+N)        <- overwrite xwa with stack value
+    //   OP xhl, xwa            <- xhl = xwa_orig OP (xsp+N)
+    //   ld xwa, xhl            <- move result back
+    //
+    //  =>  OP xwa, (xsp+N)     <- in-place: xwa = xwa_orig OP (xsp+N)
+    //
+    // OP is any ordinary binary ALU op (add/adc/sub/sbc/and/or/xor). Both the
+    // original `OP xhl,xwa` and the folded `OP xwa,(mem)` compute
+    // xwa_orig OP mem with identical operand order, so this does not rely on
+    // commutativity. The logical R,(mem) source forms are TLCS-900-encodable
+    // and sim-decoded — see memory [[mode7-logical-mem-operand-alu]].
+    //
+    // Requires xhl to be overwritten before any later use (same guard as
+    // foldXhlAccumulatorRoundtrip).  Does not fire if the mem operand itself
+    // involves xhl.
+    // =========================================================================
+    static List<String> foldXhlLoadAddRoundtrip(List<String> lines) {
+        Pattern pSaveXhl   = Pattern.compile("^(\\s+)ld\\s+xhl,\\s*xwa\\s*(?:;.*)?$",
+                                              Pattern.CASE_INSENSITIVE);
+        Pattern pLdXwaMem  = Pattern.compile("^\\s+ld\\s+xwa,\\s*(\\(xsp\\+[^)]+\\))\\s*(?:;.*)?$",
+                                              Pattern.CASE_INSENSITIVE);
+        Pattern pAddXhlXwa = Pattern.compile("^\\s+(add|adc|sub|sbc|and|or|xor)\\s+xhl,\\s*xwa\\s*(?:;.*)?$",
+                                              Pattern.CASE_INSENSITIVE);
+        Pattern pLdXwaXhl  = Pattern.compile("^\\s+ld\\s+xwa,\\s*xhl\\s*(?:;.*)?$",
+                                              Pattern.CASE_INSENSITIVE);
+        Pattern pXhlRef    = Pattern.compile("(?i)\\b(?:xhl|hl|h|l)\\b");
+
+        List<String> out = new ArrayList<>(lines.size());
+        int i = 0;
+        while (i < lines.size()) {
+            String line0 = lines.get(i);
+            Matcher m0 = pSaveXhl.matcher(line0);
+            if (m0.matches() && i + 3 < lines.size()) {
+                String line1 = lines.get(i + 1);
+                String line2 = lines.get(i + 2);
+                String line3 = lines.get(i + 3);
+                Matcher m1 = pLdXwaMem.matcher(line1);
+                Matcher m2 = pAddXhlXwa.matcher(line2);
+                Matcher m3 = pLdXwaXhl.matcher(line3);
+                if (m1.matches() && m2.matches() && m3.matches()
+                        && !pXhlRef.matcher(m1.group(1)).find()
+                        && xhlOverwrittenBeforeUse(lines, i + 4)) {
+                    String indent = m0.group(1);
+                    String op  = m2.group(1).toLowerCase(Locale.ROOT);
+                    String mem = m1.group(1);
+                    out.add(indent + op + " xwa, " + mem);
+                    i += 4;
+                    continue;
+                }
+            }
+            out.add(line0);
+            i++;
+        }
+        return out;
+    }
+
+    // =========================================================================
+    // Pass: foldSpillReloadAdd  (Rule D)
+    //
+    //   ld (xsp+T), xwa        <- spill xwa to temp slot T
+    //   ld xwa, (xsp+M)        <- load a different stack value into xwa
+    //   OP xwa, (xsp+T)        <- combine with the spilled value
+    //
+    //  =>  ld (xsp+T), xwa    <- preserve the value for later readers
+    //      OP xwa, (xsp+M)    <- load + OP in-place
+    //
+    // The original computes mem_M OP xwa_orig; the fold computes
+    // xwa_orig OP mem_M. These are equal ONLY for commutative ops, so OP is
+    // restricted to add/and/or/xor — sub/sbc/adc are NOT commutative and must
+    // not be admitted here. The logical R,(mem) source forms are
+    // TLCS-900-encodable and sim-decoded — see [[mode7-logical-mem-operand-alu]].
+    //
+    // Only adjacent instructions are accepted. Store removal belongs to the
+    // separate CFG-aware dead-store pass.
+    // =========================================================================
+    static List<String> foldSpillReloadAdd(List<String> lines) {
+        // ld (xsp+T), xwa
+        Pattern pSpill = Pattern.compile(
+            "^(\\s+)ld\\s+(\\(xsp\\+(\\d+)\\)),\\s*xwa\\s*(?:;.*)?$",
+            Pattern.CASE_INSENSITIVE);
+        // ld xwa, (xsp+M)  where M != T
+        Pattern pLoad = Pattern.compile(
+            "^\\s+ld\\s+xwa,\\s*(\\(xsp\\+(\\d+)\\))\\s*(?:;.*)?$",
+            Pattern.CASE_INSENSITIVE);
+        // OP xwa, (xsp+T)  — commutative op, must have same slot
+        Pattern pAddBack = Pattern.compile(
+            "^\\s+(add|and|or|xor)\\s+xwa,\\s*(\\(xsp\\+(\\d+)\\))\\s*(?:;.*)?$",
+            Pattern.CASE_INSENSITIVE);
+        List<String> out = new ArrayList<>(lines);
+        for (int i = 0; i < out.size(); i++) {
+            if (out.get(i) == null) continue;
+            Matcher mSpill = pSpill.matcher(out.get(i));
+            if (!mSpill.matches()) continue;
+            String indent = mSpill.group(1);
+            long slotN = Long.parseLong(mSpill.group(3));
+
+            // Next non-null non-blank line must be ld xwa,(xsp+M)
+            int j = i + 1;
+            while (j < out.size() && (out.get(j) == null || out.get(j).isBlank())) j++;
+            if (j >= out.size()) continue;
+            Matcher mLoad = pLoad.matcher(out.get(j));
+            if (!mLoad.matches()) continue;
+            long loadN = Long.parseLong(mLoad.group(2));
+            if (loadN == slotN) continue;
+            String loadMem = mLoad.group(1);
+
+            int addBackAt = j + 1;
+            while (addBackAt < out.size()
+                    && (out.get(addBackAt) == null || out.get(addBackAt).isBlank())) addBackAt++;
+            if (addBackAt >= out.size()) continue;
+            Matcher mAdd = pAddBack.matcher(out.get(addBackAt));
+            if (!mAdd.matches() || Long.parseLong(mAdd.group(3)) != slotN) continue;
+            String op = mAdd.group(1).toLowerCase(Locale.ROOT);
+            out.set(j, indent + op + " xwa, " + loadMem);
+            out.set(addBackAt, null);
+        }
+        out.removeIf(Objects::isNull);
+        return out;
+    }
+
+    // =========================================================================
+    // Pass: foldXhlImmAddToMem  (Rule E)
+    //
+    //   ld xhl, IMM            <- load immediate into xhl
+    //   add xhl, xwa           <- xhl = IMM + xwa  (commutative)
+    //   ld (mem), xhl          <- store result
+    //
+    //  =>  add xwa, IMM        <- in-place accumulate
+    //      ld (mem), xwa       <- store from xwa
+    //
+    // Requires xhl to be overwritten before any later use.
+    // =========================================================================
+    static List<String> foldXhlImmAddToMem(List<String> lines) {
+        // ld xhl, IMM  (hex or decimal immediate, no register or memory operand)
+        Pattern pLdXhlImm  = Pattern.compile(
+            "^(\\s+)ld\\s+xhl,\\s*(0[0-9a-fA-F]*h|[0-9]+)\\s*(?:;.*)?$",
+            Pattern.CASE_INSENSITIVE);
+        Pattern pAddXhlXwa = Pattern.compile(
+            "^\\s+add\\s+xhl,\\s*xwa\\s*(?:;.*)?$", Pattern.CASE_INSENSITIVE);
+        Pattern pStoreXhl  = Pattern.compile(
+            "^\\s+ld\\s+(\\([^)]+\\)),\\s*xhl\\s*(?:;.*)?$", Pattern.CASE_INSENSITIVE);
+        Pattern pXhlRef    = Pattern.compile("(?i)\\b(?:xhl|hl|h|l)\\b");
+
+        List<String> out = new ArrayList<>(lines.size());
+        int i = 0;
+        while (i < lines.size()) {
+            String line0 = lines.get(i);
+            Matcher m0 = pLdXhlImm.matcher(line0);
+            if (m0.matches() && i + 2 < lines.size()) {
+                String line1 = lines.get(i + 1);
+                String line2 = lines.get(i + 2);
+                Matcher m1 = pAddXhlXwa.matcher(line1);
+                Matcher m2 = pStoreXhl.matcher(line2);
+                if (m1.matches() && m2.matches()) {
+                    String indent = m0.group(1);
+                    String imm = m0.group(2);
+                    String mem = m2.group(1);
+                    // mem must not involve xhl/hl
+                    if (!pXhlRef.matcher(mem).find() && xhlOverwrittenBeforeUse(lines, i + 3)) {
+                        out.add(indent + "add xwa, " + imm);
+                        out.add(indent + "ld " + mem + ", xwa");
+                        i += 3;
+                        continue;
+                    }
+                }
+            }
+            out.add(line0);
+            i++;
+        }
+        return out;
+    }
+
+    // =========================================================================
+    // Pass: invertCondJumpPair  (Rule G)
+    //
+    //   jr CC, .Lbb_edge       <- conditional jump to edge block
+    //   jr .Lbb_exit           <- unconditional fall-through to exit
+    // .Lbb_edge:               <- edge label immediately follows
+    //
+    //  =>  jr NCC, .Lbb_exit   <- invert condition; fall through into edge block
+    //
+    // Eliminates one taken-branch penalty and one instruction.  The NCC map
+    // covers the standard TLCS-900 condition codes.
+    // =========================================================================
+    static List<String> invertCondJumpPair(List<String> lines) {
+        // jrl? CC, .Lbb_target  (short jr or long jrl conditional jump)
+        Pattern pCondJr  = Pattern.compile(
+            "^(\\s+)(jrl?)\\s+(\\w+),\\s*(\\.Lbb_\\S+)\\s*(?:;.*)?$",
+            Pattern.CASE_INSENSITIVE);
+        // jrl? .Lbb_exit  (unconditional jump)
+        Pattern pUncondJr = Pattern.compile(
+            "^\\s+(jrl?)\\s+(\\.Lbb_\\S+)\\s*(?:;.*)?$",
+            Pattern.CASE_INSENSITIVE);
+        // label line: .Lbb_X:
+        Pattern pLabel = Pattern.compile("^(\\.Lbb_\\S+):.*$");
+
+        // Negation table for TLCS-900 condition codes
+        Map<String, String> negate = new HashMap<>();
+        negate.put("c",   "nc");  negate.put("nc",  "c");
+        negate.put("z",   "nz");  negate.put("nz",  "z");
+        negate.put("m",   "p");   negate.put("p",   "m");
+        negate.put("v",   "nv");  negate.put("nv",  "v");
+        negate.put("ov",  "nov"); negate.put("nov", "ov");
+        negate.put("gt",  "le");  negate.put("le",  "gt");
+        negate.put("ge",  "lt");  negate.put("lt",  "ge");
+        negate.put("ugt", "ule"); negate.put("ule", "ugt");
+        negate.put("uge", "ult"); negate.put("ult", "uge");
+
+        // Count all label references so we can update them
+        Map<String, Integer> refCount = new HashMap<>();
+        Pattern pAnyRef = Pattern.compile("(?<![\\w.])(\\.Lbb_\\w+)");
+        for (String line : lines) {
+            Matcher m = pAnyRef.matcher(line);
+            while (m.find()) refCount.merge(m.group(1), 1, Integer::sum);
+        }
+
+        List<String> out = new ArrayList<>(lines);
+        for (int i = 0; i < out.size() - 1; i++) {
+            if (out.get(i) == null) continue;
+            Matcher mCond = pCondJr.matcher(out.get(i));
+            if (!mCond.matches()) continue;
+            String indent  = mCond.group(1);
+            String jmpInsn = mCond.group(2).toLowerCase(Locale.ROOT);   // "jr" or "jrl"
+            String cc      = mCond.group(3).toLowerCase(Locale.ROOT);
+            String edge    = mCond.group(4);   // the label jumped-to conditionally
+
+            String negCC = negate.get(cc);
+            if (negCC == null) continue;   // unknown condition code — skip
+
+            // Next line (skip blanks) must be unconditional jr/jrl to exit
+            int j = i + 1;
+            while (j < out.size() && out.get(j) != null && out.get(j).isBlank()) j++;
+            if (j >= out.size() || out.get(j) == null) continue;
+            Matcher mUncond = pUncondJr.matcher(out.get(j));
+            if (!mUncond.matches()) continue;
+            String uncondInsn = mUncond.group(1).toLowerCase(Locale.ROOT);
+            String exit = mUncond.group(2);
+            if (exit.equals(edge)) continue;   // same target — no benefit
+
+            // Line after the unconditional jr must be the edge label
+            int k = j + 1;
+            while (k < out.size() && out.get(k) != null && out.get(k).isBlank()) k++;
+            if (k >= out.size() || out.get(k) == null) continue;
+            Matcher mEdge = pLabel.matcher(out.get(k).trim());
+            if (!mEdge.matches() || !mEdge.group(1).equals(edge)) continue;
+
+            // Use the same jump instruction form as the unconditional jump
+            // (so jrl CC stays jrl, jr CC stays jr)
+            String newInsn = uncondInsn.equals("jrl") ? "jrl" : jmpInsn;
+            // Transform: replace conditional jump with negated jump to exit; drop the unconditional jump
+            out.set(i, indent + newInsn + " " + negCC + ", " + exit);
+            refCount.merge(edge, -1, Integer::sum);   // one fewer reference to edge
+            refCount.merge(exit, 1, Integer::sum);    // one more reference to exit
+            out.set(j, null);
+            refCount.merge(exit, -1, Integer::sum);   // the original unconditional jr is gone
+            // Note: the edge label refCount drop from the conditional jr is already accounted for above.
+            // exit gets +1 from the new jr NC, exit and -1 from removing the old jr exit => net 0. ✓
+        }
+        out.removeIf(Objects::isNull);
+        return out;
     }
 
 }
