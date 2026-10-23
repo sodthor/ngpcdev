@@ -36,7 +36,7 @@
  * ---------------------------------------------------------------------------
  */
 #include "ngpc.h"
-
+u16 GetRandom(u16 Value);
 #include "ngpc_linkkit/ngpc_linkkit.h"
 #include "ngpc_linkkit/ngpc_linkkit_com.h"
 
@@ -130,10 +130,10 @@ static void lk_reset_parser(void)
 
 static void lk_purge_rx(void)
 {
-    u8 b, guard;
+    u8 guard;
     guard = 0;
     while (lkcom_rx_pending() && guard < 255) {
-        b = lkcom_get_data();
+        lkcom_get_data();
         guard++;
     }
     lk_reset_parser();
