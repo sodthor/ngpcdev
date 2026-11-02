@@ -22,10 +22,12 @@ public final class Ir2Tlcs900CorrectnessTest {
     private static int executions;
 
     private static void command(String... args) throws Exception {
+        Path log = output.resolve("command.log");
         Process process = new ProcessBuilder(args).directory(output.toFile())
-                .redirectErrorStream(true).start();
-        String text = new String(process.getInputStream().readAllBytes());
-        if (process.waitFor() != 0) throw new AssertionError(String.join(" ", args) + "\n" + text);
+                .redirectErrorStream(true).redirectOutput(log.toFile()).start();
+        // Wine service processes can inherit a pipe and keep it open after the assembler exits.
+        if (process.waitFor() != 0)
+            throw new AssertionError(String.join(" ", args) + "\n" + Files.readString(log));
     }
 
     private static void check(String name, String body, int bits, int expected,
@@ -274,6 +276,339 @@ public final class Ir2Tlcs900CorrectnessTest {
         }
     }
 
+    private static void comparisonBranches() throws Exception {
+        for (int bits : new int[] {8, 16, 32}) {
+            for (String predicate : List.of("eq", "ne", "slt", "sgt", "sle", "sge",
+                    "ult", "ugt", "ule", "uge")) {
+                for (int value : new int[] {-1, 0, 1}) {
+                    for (boolean variableRight : new boolean[] {false, true}) {
+                        boolean truth = switch (predicate) {
+                            case "eq" -> value == 0;
+                            case "ne" -> value != 0;
+                            case "slt" -> value < 0;
+                            case "sgt" -> value > 0;
+                            case "sle" -> value <= 0;
+                            case "sge" -> value >= 0;
+                            case "ult" -> false;
+                            case "ugt" -> value != 0;
+                            case "ule" -> value == 0;
+                            default -> true;
+                        };
+                        String type = "i" + bits;
+                        String name = "cmp_branch_" + bits + "_" + predicate + "_"
+                            + (value < 0 ? "negative" : value) + "_" + variableRight;
+                        String body = "  store volatile " + type + " " + value
+                            + ", ptr inttoptr (i32 16640 to ptr)\n"
+                            + "  %left = load volatile " + type + ", ptr inttoptr (i32 16640 to ptr)\n";
+                        if (variableRight) body += "  store volatile " + type
+                            + " 0, ptr inttoptr (i32 16644 to ptr)\n"
+                            + "  %right = load volatile " + type + ", ptr inttoptr (i32 16644 to ptr)\n";
+                        body += "  %condition = icmp " + predicate + " " + type
+                            + " %left, " + (variableRight ? "%right" : "0") + "\n"
+                            + "  br i1 %condition, label %yes, label %no\n";
+                        String yes = "yes:\n  ret i32 11\n";
+                        String no = "no:\n  ret i32 23\n";
+                        body += variableRight ? no + yes : yes + no;
+                        check(name, body, 32, truth ? 11 : 23, null);
+                        require(!Files.readString(output.resolve(name + ".asm")).contains("scc "),
+                            name + ": comparison boolean was unnecessarily materialized");
+                    }
+                }
+            }
+        }
+        for (int value : new int[] {0, 7}) {
+            String prefix = "  store volatile i32 " + value + ", ptr inttoptr (i32 16640 to ptr)\n"
+                + "  %left = load volatile i32, ptr inttoptr (i32 16640 to ptr)\n"
+                + "  %condition = icmp ult i32 %left, 4\n";
+            String branch = "  br i1 %condition, label %yes, label %no\n";
+            for (String shape : List.of("both", "true", "false")) {
+                String yes = shape.equals("false") ? "yes:\n  ret i32 11\n"
+                    : "yes:\n  %y = phi i32 [ %left, %entry ]\n"
+                        + "  %yr = add i32 %y, 11\n  ret i32 %yr\n";
+                String no = shape.equals("true") ? "no:\n  ret i32 23\n"
+                    : "no:\n  %n = phi i32 [ %left, %entry ]\n"
+                        + "  %nr = add i32 %n, 23\n  ret i32 %nr\n";
+                String name = "cmp_branch_phi_" + shape + "_" + value;
+                int expected = value < 4 ? 11 + (shape.equals("false") ? 0 : value)
+                    : 23 + (shape.equals("true") ? 0 : value);
+                check(name, prefix + branch + yes + no, 32, expected, null);
+                require(!Files.readString(output.resolve(name + ".asm")).contains("scc "),
+                    name + ": PHI edge prevented fusion");
+            }
+            String multiple = "cmp_branch_multiple_use_" + value;
+            check(multiple, prefix + "  %number = zext i1 %condition to i32\n" + branch
+                + "yes:\n  ret i32 %number\nno:\n  ret i32 %number", 32, value < 4 ? 1 : 0, null);
+            require(Files.readString(output.resolve(multiple + ".asm")).contains("scc "),
+                multiple + ": multiply-used boolean was not materialized");
+            String adjacentMultiple = "cmp_branch_adjacent_multiple_use_" + value;
+            check(adjacentMultiple, prefix + branch
+                + "yes:\n  %yn = zext i1 %condition to i32\n  ret i32 %yn\n"
+                + "no:\n  %nn = zext i1 %condition to i32\n  ret i32 %nn", 32, value < 4 ? 1 : 0, null);
+            require(Files.readString(output.resolve(adjacentMultiple + ".asm")).contains("scc "),
+                adjacentMultiple + ": successor use of boolean was ignored");
+            String intervening = "cmp_branch_intervening_" + value;
+            check(intervening, prefix + "  store volatile i32 99, ptr inttoptr (i32 16644 to ptr)\n"
+                + branch + "yes:\n  ret i32 11\nno:\n  ret i32 23", 32, value < 4 ? 11 : 23, null);
+            require(Files.readString(output.resolve(intervening + ".asm")).contains("scc "),
+                intervening + ": flags were forwarded across an intervening instruction");
+        }
+        check("cmp_branch_samesign", "  %condition = icmp samesign ugt i16 7, 4\n"
+            + "  br i1 %condition, label %yes, label %no\nyes:\n  ret i32 11\nno:\n  ret i32 23",
+            32, 11, null);
+        for (int bits : new int[] {8, 16, 32}) {
+            int min = bits == 32 ? Integer.MIN_VALUE : -(1 << (bits - 1));
+            int max = bits == 32 ? Integer.MAX_VALUE : (1 << (bits - 1)) - 1;
+            for (String predicate : List.of("eq", "ne", "slt", "sgt", "sle", "sge",
+                    "ult", "ugt", "ule", "uge")) {
+                boolean signed = predicate.startsWith("s");
+                boolean truth = switch (predicate) {
+                    case "eq" -> false;
+                    case "ne" -> true;
+                    case "slt", "ult", "sle", "ule" -> signed;
+                    default -> !signed;
+                };
+                for (boolean variableRight : new boolean[] {false, true}) {
+                    String type = "i" + bits;
+                    String body = "  store volatile " + type + " " + min
+                        + ", ptr inttoptr (i32 16640 to ptr)\n"
+                        + "  %left = load volatile " + type + ", ptr inttoptr (i32 16640 to ptr)\n";
+                    if (variableRight) body += "  store volatile " + type + " " + max
+                        + ", ptr inttoptr (i32 16644 to ptr)\n"
+                        + "  %right = load volatile " + type + ", ptr inttoptr (i32 16644 to ptr)\n";
+                    body += "  %condition = icmp " + predicate + " " + type + " %left, "
+                        + (variableRight ? "%right" : max) + "\n"
+                        + "  br i1 %condition, label %yes, label %no\n"
+                        + "yes:\n  ret i32 11\nno:\n  ret i32 23";
+                    check("cmp_branch_boundary_" + bits + "_" + predicate + "_" + variableRight,
+                        body, 32, truth ? 11 : 23, null);
+                }
+            }
+        }
+    }
+
+    private static void comparisonSelectsAndByteBranches() throws Exception {
+        for (int value : new int[] {-128, 127}) {
+            for (String arm : List.of("true", "false", "both")) {
+                String name = "cmp_select_scratch_" + arm + "_" + (value < 0 ? "negative" : value);
+                String comparison = "%condition = icmp slt i8 " + value + ", 0";
+                String select = "%chosen = select i1 %condition, i32 "
+                    + (arm.equals("false") ? "77" : "%held") + ", i32 "
+                    + (arm.equals("true") ? "77" : "%held");
+                String ir = "define i32 @probe() {\nentry:\n"
+                    + "  %held = add i32 305419896, 0\n  " + comparison + "\n  " + select
+                    + "\n  ret i32 %chosen\n}";
+                verifyModule(name, ir);
+                var function = new Ir2Tlcs900.IrFunction("probe", "i32", "", new ArrayList<>(ir.lines().toList()));
+                var emitter = new Ir2Tlcs900.FuncTranslator(function, Set.of(), Map.of());
+                emitter.currentBlock = emitter.parseBody().get(0);
+                emitter.currentInstrIndex = 1;
+                emitter.regOnly.add("held");
+                emitter.regOnly.add("chosen");
+                emitter.slots.put(Ir2Tlcs900.FuncTranslator.SELSPILL_SLOT, new int[]{0, 4});
+                emitter.emit("add xsp, -4");
+                emitter.emit("ld xwa, 012345678h");
+                emitter.waSlotName = "held";
+                emitter.waSlotBits = 32;
+                require(emitter.emitImmediateComparisonSelect(comparison, select, Map.of()),
+                    name + ": regOnly operand prevented fusion");
+                emitter.emit("ld xhl, xwa");
+                emitter.emit("add xsp, 4");
+                emitter.emit("ret");
+                String assembly = "\tcpu 93C141\n\tmaxmode on\n\torg 0200000h\n_probe:\n"
+                    + String.join("\n", emitter.out) + "\n\tend\n";
+                int expected = arm.equals("both") || (value < 0) == arm.equals("true") ? 0x12345678 : 77;
+                Files.writeString(output.resolve(name + ".asm"), assembly);
+                fixtures.add(new Fixture(name, 32, expected, null));
+                Files.write(output.resolve(name + "_opt.asm"), AsmOptimizer.runPasses(assembly.lines().toList(), false));
+                fixtures.add(new Fixture(name + "_opt", 32, expected, null));
+            }
+        }
+        for (int bits : new int[] {8, 16, 32}) {
+            for (String predicate : List.of("eq", "ne", "slt", "sgt", "sle", "sge",
+                    "ult", "ugt", "ule", "uge")) {
+                for (int value : new int[] {-1, 0, 1}) {
+                    boolean truth = switch (predicate) {
+                        case "eq", "ule" -> value == 0;
+                        case "ne", "ugt" -> value != 0;
+                        case "slt" -> value < 0;
+                        case "sgt" -> value > 0;
+                        case "sle" -> value <= 0;
+                        case "sge" -> value >= 0;
+                        case "ult" -> false;
+                        default -> true;
+                    };
+                    String type = "i" + bits;
+                    String name = "cmp_select_" + bits + "_" + predicate + "_"
+                        + (value < 0 ? "negative" : value);
+                    String body = "  store volatile " + type + " " + value
+                        + ", ptr inttoptr (i32 16640 to ptr)\n"
+                        + "  %left = load volatile " + type + ", ptr inttoptr (i32 16640 to ptr)\n"
+                        + "  store volatile " + type + " 0, ptr inttoptr (i32 16644 to ptr)\n"
+                        + "  %right = load volatile " + type + ", ptr inttoptr (i32 16644 to ptr)\n"
+                        + "  %condition = icmp " + predicate + " " + type + " %left, %right\n"
+                        + "  %chosen = select i1 %condition, " + type + " 17, " + type + " 23\n"
+                        + "  ret " + type + " %chosen";
+                    check(name, body, bits, truth ? 17 : 23, null);
+                    require(!Files.readString(output.resolve(name + ".asm")).contains("scc "),
+                        name + ": select condition was materialized");
+                }
+            }
+        }
+        for (int bits : new int[] {8, 16, 32}) {
+            for (int value : new int[] {-128, 0, 127}) {
+                for (boolean inputOnTrue : new boolean[] {false, true}) {
+                    String type = "i" + bits;
+                    String body = "  store volatile " + type + " " + value
+                        + ", ptr inttoptr (i32 16640 to ptr)\n"
+                        + "  %value = load volatile " + type + ", ptr inttoptr (i32 16640 to ptr)\n"
+                        + "  %condition = icmp slt " + type + " %value, 0\n"
+                        + "  %chosen = select i1 %condition, " + type + " "
+                        + (inputOnTrue ? "%value" : "77") + ", " + type + " "
+                        + (inputOnTrue ? "77" : "%value") + "\n  ret " + type + " %chosen";
+                    check("cmp_select_live_" + bits + "_" + (value < 0 ? "negative" : value)
+                        + "_" + inputOnTrue, body, bits, (value < 0) == inputOnTrue ? value : 77, null);
+                }
+            }
+        }
+        for (int value : new int[] {0, 1, 15, 16, 48, 127, 128, 255}) {
+            for (boolean local : new boolean[] {false, true}) {
+                String name = "byte_load_branch_" + value + "_" + local;
+                String body = local ? "  %buffer = alloca [2 x i8], align 1\n"
+                    + "  %p = getelementptr i8, ptr %buffer, i32 1\n"
+                    + "  store volatile i8 " + value + ", ptr %p\n" : "";
+                body += "  store volatile i32 " + (0x5a7f1200 | value)
+                    + ", ptr inttoptr (i32 16640 to ptr)\n";
+                if (local) body += "  %q = getelementptr i8, ptr %buffer, i32 1\n";
+                body += "  %byte = load volatile i8, ptr "
+                    + (local ? "%q" : "inttoptr (i32 16640 to ptr)") + "\n"
+                    + "  %masked = and i8 %byte, 48\n"
+                    + "  %condition = icmp ne i8 %masked, 0\n"
+                    + "  br i1 %condition, label %yes, label %no\n"
+                    + "yes:\n  ret i32 17\nno:\n  ret i32 23";
+                check(name, body, 32, (value & 48) != 0 ? 17 : 23, null);
+                if (!local) require(!Files.readString(output.resolve(name + ".asm")).contains("xor w, w"),
+                    name + ": branch-only load still clears W");
+            }
+            for (int mask : new int[] {0, 1, 16, 48, 255}) {
+                String name = "byte_branch_" + value + "_" + mask;
+                String body = "  store volatile i32 " + (0x5a7f1200 | value)
+                    + ", ptr inttoptr (i32 16640 to ptr)\n"
+                    + "  %wide = load volatile i32, ptr inttoptr (i32 16640 to ptr)\n"
+                    + "  %byte = trunc i32 %wide to i8\n  %masked = and i8 %byte, " + mask + "\n"
+                    + "  %condition = icmp ne i8 %masked, 0\n"
+                    + "  br i1 %condition, label %yes, label %no\n"
+                    + "yes:\n  ret i32 17\nno:\n  ret i32 23";
+                check(name, body, 32, (value & mask) != 0 ? 17 : 23, null);
+                require(!Files.readString(output.resolve(name + ".asm")).contains("and wa, 0ffh"),
+                    name + ": branch-only byte was normalized");
+            }
+            String prefix = "  store volatile i32 " + (0x5a7f1200 | value)
+                + ", ptr inttoptr (i32 16640 to ptr)\n"
+                + "  %wide = load volatile i32, ptr inttoptr (i32 16640 to ptr)\n"
+                + "  %byte = trunc i32 %wide to i8\n";
+            check("byte_branch_unmasked_" + value, prefix + "  %condition = icmp eq i8 %byte, 0\n"
+                + "  br i1 %condition, label %yes, label %no\nyes:\n  ret i32 17\nno:\n  ret i32 23",
+                32, value == 0 ? 17 : 23, null);
+            check("byte_branch_wider_successor_" + value, prefix
+                + "  %masked = and i8 %byte, 16\n  %condition = icmp eq i8 %masked, 0\n"
+                + "  br i1 %condition, label %yes, label %no\n"
+                + "yes:\n  %a = zext i8 %byte to i32\n  ret i32 %a\n"
+                + "no:\n  %b = zext i8 %byte to i32\n  ret i32 %b", 32, value, null);
+        }
+        for (int value : new int[] {0, 7}) {
+            String prefix = "  store volatile i32 " + value + ", ptr inttoptr (i32 16640 to ptr)\n"
+                + "  %value = load volatile i32, ptr inttoptr (i32 16640 to ptr)\n"
+                + "  %condition = icmp ult i32 %value, 4\n";
+            String name = "cmp_select_multiple_use_" + value;
+            check(name, prefix + "  %chosen = select i1 %condition, i32 17, i32 23\n"
+                + "  %number = zext i1 %condition to i32\n"
+                + "  %result = add i32 %chosen, %number\n  ret i32 %result",
+                32, value < 4 ? 18 : 23, null);
+            require(Files.readString(output.resolve(name + ".asm")).contains("scc "),
+                name + ": multiply-used select condition was not materialized");
+            check("cmp_select_intervening_" + value, prefix
+                + "  store volatile i32 99, ptr inttoptr (i32 16644 to ptr)\n"
+                + "  %chosen = select i1 %condition, i32 17, i32 23\n  ret i32 %chosen",
+                32, value < 4 ? 17 : 23, null);
+        }
+    }
+
+    private static void storeSelectCleanup() throws Exception {
+        for (int value : new int[]{0, 127, 128, 255}) {
+            for (boolean add : new boolean[]{false, true}) {
+                String name = "byte_store_only_" + value + "_" + add;
+                byte[] memory = SEED.clone();
+                memory[0] = (byte) (value + (add ? 1 : 0));
+                String body = "  store volatile i32 " + (0x5a7f1200 | value)
+                    + ", ptr inttoptr (i32 16640 to ptr)\n"
+                    + "  %wide = load volatile i32, ptr inttoptr (i32 16640 to ptr)\n"
+                    + "  %byte = trunc i32 %wide to i8\n"
+                    + (add ? "  %added = add i8 %byte, 1\n" : "")
+                    + "  store volatile i8 %" + (add ? "added" : "byte")
+                    + ", ptr inttoptr (i32 16384 to ptr)\n  ret i32 17";
+                check(name, body, 32, 17, memory);
+                require(!Files.readString(output.resolve(name + ".asm")).contains("and wa, 0ffh"),
+                    name + ": byte-only store normalized W");
+                check(name + "_wide_use", body.replace("  ret i32 17",
+                    "  %result = zext i8 %byte to i32\n  ret i32 %result"), 32, value, memory);
+            }
+            byte[] memory = SEED.clone();
+            memory[0] = (byte) (value + 1);
+            check("byte_load_add_store_" + value,
+                "  store volatile i8 " + value + ", ptr inttoptr (i32 16640 to ptr)\n"
+                + "  %byte = load volatile i8, ptr inttoptr (i32 16640 to ptr)\n"
+                + "  %added = add i8 %byte, 1\n"
+                + "  store volatile i8 %added, ptr inttoptr (i32 16384 to ptr)\n  ret i32 17",
+                32, 17, memory);
+        }
+        for (int value : new int[]{0, 1, 65536, 0x200000}) {
+            for (String predicate : List.of("eq", "ne")) {
+                for (boolean nullLeft : new boolean[]{false, true}) {
+                    String name = "pointer_null_branch_" + value + "_" + predicate + "_" + nullLeft;
+                    String body = "  store volatile i32 " + value + ", ptr inttoptr (i32 16640 to ptr)\n"
+                        + "  %value = load volatile i32, ptr inttoptr (i32 16640 to ptr)\n"
+                        + "  %pointer = inttoptr i32 %value to ptr\n"
+                        + "  %condition = icmp " + predicate + " ptr "
+                        + (nullLeft ? "null, %pointer" : "%pointer, null") + "\n"
+                        + "  br i1 %condition, label %yes, label %no\n"
+                        + "yes:\n  ret i32 17\nno:\n  ret i32 23";
+                    check(name, body, 32, (value == 0) == predicate.equals("eq") ? 17 : 23, null);
+                    require(!Files.readString(output.resolve(name + ".asm")).contains("scc "),
+                        name + ": null test materialized a boolean");
+                }
+            }
+        }
+        for (int value : new int[]{0, 7}) {
+            for (boolean fused : new boolean[]{false, true}) {
+                String prefix = "  store volatile i32 " + value + ", ptr inttoptr (i32 16640 to ptr)\n"
+                    + "  %value = load volatile i32, ptr inttoptr (i32 16640 to ptr)\n"
+                    + "  %condition = icmp ult i32 %value, 4\n"
+                    + (fused ? "" : "  store volatile i32 99, ptr inttoptr (i32 16644 to ptr)\n");
+                for (String arm : List.of("true", "false", "both", "neither")) {
+                    String left = arm.equals("true") || arm.equals("both") ? "%value" : "17";
+                    String right = arm.equals("false") || arm.equals("both") ? "%value" : "23";
+                    int selected = value < 4 ? (left.equals("%value") ? value : 17)
+                        : (right.equals("%value") ? value : 23);
+                    check("select_sink_" + value + "_" + fused + "_" + arm, prefix
+                        + "  %chosen = select i1 %condition, i32 " + left + ", i32 " + right + "\n"
+                        + "  %sum = add i32 %chosen, %value\n  ret i32 %sum", 32, selected + value, null);
+                }
+            }
+        }
+        for (int value : new int[]{0, 1, 128, 255, 256, 65535}) {
+            String assembly = "\tcpu 93C141\n\tmaxmode on\n\torg 0200000h\n_probe:\n"
+                + "\tld xwa, " + value + "\n\tand wa, 1\n\tor a, a\n\tjr Z, .Lzero\n"
+                + "\tld hl, 17\n\tcp hl, 0\n\tret\n.Lzero:\n\tld hl, 23\n\tcp hl, 0\n\tret\n\tend\n";
+            String name = "byte_boolean_flags_" + value;
+            Files.writeString(output.resolve(name + ".asm"), assembly);
+            fixtures.add(new Fixture(name, 16, (value & 1) != 0 ? 17 : 23, null));
+            List<String> optimized = AsmOptimizer.runPasses(assembly.lines().toList(), false);
+            require(!optimized.contains("\tor a, a"), name + ": redundant boolean self-test");
+            Files.write(output.resolve(name + "_opt.asm"), optimized);
+            fixtures.add(new Fixture(name + "_opt", 16, (value & 1) != 0 ? 17 : 23, null));
+        }
+    }
+
     private static void arithmetic() throws Exception {
         for (String operation : new String[] {"ashr", "sdiv", "srem"}) {
             for (int left : new int[] {-128, -7, 7, 127}) {
@@ -409,6 +744,77 @@ public final class Ir2Tlcs900CorrectnessTest {
             }
         }
         System.out.println("Counter comparison rewrite guards: PASS");
+    }
+
+    private static void directLoadCopies() throws Exception {
+        AsmOptimizerDirectLoadTest.main(new String[0]);
+        for (int bits : new int[]{8, 16, 32}) {
+            String temporary = bits == 32 ? "xwa" : bits == 16 ? "wa" : "a";
+            String destination = bits == 32 ? "xiy" : bits == 16 ? "iy" : "e";
+            String parent = bits == 8 ? "xde" : "xiy";
+            int mask = bits == 32 ? -1 : (1 << bits) - 1;
+            for (String shape : List.of("immediate", "register", "bank", "absolute", "symbol",
+                    "stack", "indirect", "indexed", "self_address", "dest_address")) {
+                for (int carry : new int[]{0, 1}) {
+                    for (boolean branch : new boolean[]{false, true}) {
+                        String source = switch (shape) {
+                            case "immediate" -> Ir2Tlcs900.fmtImm(0x12345678 & mask);
+                            case "register" -> bits == 32 ? "xbc" : bits == 16 ? "bc" : "c";
+                            case "bank" -> bits == 32 ? "xbc1" : bits == 16 ? "rbc1" : "rc1";
+                            case "absolute" -> "(04000h)";
+                            case "symbol" -> "(_data)";
+                            case "stack" -> "(xsp+12)";
+                            case "indirect" -> "(xix)";
+                            case "indexed" -> "(xix+de)";
+                            case "self_address" -> "(xwa)";
+                            default -> bits == 8 ? "(xde)" : "(xiy)";
+                        };
+                        int value = switch (shape) {
+                            case "immediate", "register", "bank", "stack" -> 0x12345678;
+                            case "indexed" -> 0x08070605;
+                            default -> 0x04030201;
+                        };
+                        value &= mask;
+                        int initialParent = bits == 8 ? (shape.equals("indexed") ? 4 : 0x4000)
+                            : shape.equals("dest_address") ? 0x4000 : 0xd00d0000;
+                        int expected = (initialParent & ~mask) | value;
+                        List<String> assembly = new ArrayList<>(List.of(
+                            "\tcpu 93C141", "\tmaxmode on", "\torg 0200000h", "_data equ 04000h",
+                            "; experimental-loop-register-allocation", AsmOptimizer.PROTECTED_BEGIN + "probe",
+                            "_probe:", "\tadd xsp, -16", "\tld xbc, 012345678h", "\tld xbc1, 012345678h",
+                            "\tld (xsp+12), xbc", "\tld xwa, 04000h", "\tld xix, 04000h",
+                            "\tld xde, " + (shape.equals("indexed") ? "4" : "04000h"),
+                            "\tld xiy, " + (shape.equals("dest_address") ? "04000h" : "0d00d0000h"),
+                            "\tld xiz, 0", "\tcp xiz, " + carry,
+                            "\tld " + temporary + ", " + source, "\tld " + destination + ", " + temporary));
+                        if (branch) assembly.addAll(List.of("\tjr C, .Lother", "\tld xwa, 055aa33cch",
+                            "\tjr .Ljoin", ".Lother:", "\tld xwa, 055aa33cch", ".Ljoin:"));
+                        else assembly.addAll(List.of(".Ljoin:", "\tld xwa, 055aa33cch"));
+                        assembly.addAll(List.of("\tscc C, l", "\tld (04010h), l", "\tscc Z, l",
+                            "\tld (04011h), l", "\tld (04018h), xwa", "\tld (0401ch), " + parent,
+                            "\tld xhl, " + parent, "\tadd xsp, 16", "\tret",
+                            AsmOptimizer.PROTECTED_END + "probe", "\tend"));
+                        List<String> folded = AsmOptimizer.foldDirectLoadCopies(assembly);
+                        require(folded.contains("\tld " + destination + ", " + source)
+                            && !folded.contains("\tld " + destination + ", " + temporary),
+                            "direct-load fold fires: " + bits + " " + shape);
+                        byte[] expectedMemory = SEED.clone();
+                        expectedMemory[16] = (byte) carry;
+                        expectedMemory[17] = (byte) (1 - carry);
+                        for (int byteIndex = 0; byteIndex < 4; byteIndex++) {
+                            expectedMemory[24 + byteIndex] = (byte) (0x55aa33cc >>> (8 * byteIndex));
+                            expectedMemory[28 + byteIndex] = (byte) (expected >>> (8 * byteIndex));
+                        }
+                        List<List<String>> variants = List.of(assembly, folded, AsmOptimizer.runPasses(assembly, false));
+                        for (int variant = 0; variant < variants.size(); variant++) {
+                            String name = "direct_load_" + bits + "_" + shape + "_" + carry + "_" + branch + "_" + variant;
+                            Files.write(output.resolve(name + ".asm"), variants.get(variant));
+                            fixtures.add(new Fixture(name, 32, expected, expectedMemory));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private static void aluFolds() throws Exception {
@@ -581,6 +987,7 @@ public final class Ir2Tlcs900CorrectnessTest {
     }
 
     private static void loopAllocation() throws Exception {
+        loopOptimizations();
         globalGepScratch();
         spillAddition();
                 for (int iterations : new int[] {1, 2, 5}) {
@@ -1480,6 +1887,199 @@ public final class Ir2Tlcs900CorrectnessTest {
         }
     }
 
+    private static void loopOptimizations() throws Exception {
+        LoopRegisterAllocatorOptimizationTest.main(new String[0]);
+        for (int width : new int[]{8, 16, 32}) for (int step : new int[]{-8, 8}) {
+            byte[] expected = SEED.clone();
+            int pointer = step < 0 ? 64 : 32, bytes = width / 8;
+            for (int i = 0; i < 3; i++) {
+                byte[] value = Arrays.copyOfRange(expected, pointer + step, pointer + step + bytes);
+                System.arraycopy(value, 0, expected, pointer + 16, bytes);
+                System.arraycopy(value, 0, expected, pointer + step, bytes);
+                pointer += step;
+            }
+            String asm = checkAllocated("loop_offset_" + width + "_" + (step < 0 ? "neg" : "pos"), """
+                entry:
+                  br label %header
+                header:
+                  %p = phi ptr [ inttoptr (i32 BASE to ptr), %entry ], [ %pn, %latch ]
+                  %i = phi i16 [ 0, %entry ], [ %next, %latch ]
+                  %pn = getelementptr i8, ptr %p, i32 STEP
+                  %q = getelementptr i8, ptr %p, i32 16
+                  %value = load iWIDTH, ptr %pn
+                  store iWIDTH %value, ptr %q
+                  store iWIDTH %value, ptr %pn
+                  br label %latch
+                latch:
+                  %next = add i16 %i, 1
+                  %more = icmp ult i16 %next, 3
+                  br i1 %more, label %header, label %exit
+                exit:
+                  ret i32 17
+                """.replace("BASE", Integer.toString(DATA_BASE + (step < 0 ? 64 : 32)))
+                    .replace("STEP", Integer.toString(step)).replace("WIDTH", Integer.toString(width)), expected);
+            require(asm.contains("+16)"), "constant GEP load/store must use a displacement");
+        }
+        // Keep the deferred pointer base live across enough unrelated definitions
+        // to require pressure spills. Extending liveness only after allocation fails.
+        StringBuilder pressure = new StringBuilder("entry:\n  br label %header\nheader:\n"
+            + "  %p = phi ptr [ inttoptr (i32 16464 to ptr), %entry ], [ %pn, %header ]\n"
+            + "  %i = phi i16 [ 0, %entry ], [ %next, %header ]\n"
+            + "  %pn = getelementptr i8, ptr %p, i32 4\n"
+            + "  %q = getelementptr i8, ptr %p, i32 8\n");
+        int total = 0;
+        for (int n = 0; n < 20; n++) {
+            pressure.append("  %v").append(n).append(" = load i32, ptr inttoptr (i32 ")
+                .append(DATA_BASE + 4 * n).append(" to ptr)\n");
+            for (int k = 0; k < 4; k++) total += (SEED[n * 4 + k] & 255) << (8 * k);
+        }
+        for (int n = 1; n < 20; n++) pressure.append("  %s").append(n).append(" = add i32 ")
+            .append(n == 1 ? "%v0" : "%s" + (n - 1)).append(", %v").append(n).append('\n');
+        pressure.append("  store i32 %s19, ptr %q\n  store i32 %s19, ptr %pn\n"
+            + "  %next = add i16 %i, 1\n  %more = icmp ult i16 %next, 3\n"
+            + "  br i1 %more, label %header, label %exit\nexit:\n  ret i32 17\n");
+        byte[] expected = SEED.clone();
+        for (int i = 0; i < 3; i++) for (int offset : new int[]{84 + i * 4, 88 + i * 4})
+            for (int k = 0; k < 4; k++) expected[offset + k] = (byte) (total >>> (k * 8));
+        checkAllocated("loop_offset_pressure", pressure.toString(), expected);
+
+        boolean sawUpperWords = false, sawRangeAddress = false;
+        int[][] coordinates = {{0, 0}, {65535, 65535}, {65536, 511}, {131071, 131071},
+            {131072, 0}, {131073, 1}, {196607, 65535}, {0, 131072}, {-1, 0},
+            {Integer.MIN_VALUE, 0}, {0, -1}, {Integer.MAX_VALUE, 1}};
+        for (String predicate : List.of("ult", "uge")) for (int ci = 0; ci < coordinates.length; ci++) {
+            int x = coordinates[ci][0], y = coordinates[ci][1];
+            int result = Integer.compareUnsigned(x | y, 131072) < 0 ? (y << 1) & 261632 : x ^ y;
+            expected = SEED.clone();
+            for (int k = 0; k < 4; k++) expected[k] = (byte) (result >>> (8 * k));
+            String body = """
+                entry:
+                  br label %header
+                header:
+                  %x = phi i32 [ X, %entry ], [ %nx, %latch ]
+                  %y = phi i32 [ Y, %entry ], [ %ny, %latch ]
+                  %i = phi i16 [ 0, %entry ], [ %next, %latch ]
+                  %both = or i32 %x, %y
+                  %ok = icmp PRED i32 %both, 131072
+                  br i1 %ok, label %TRUE, label %FALSE
+                inside:
+                  %shift = shl i32 %y, 1
+                  %mask = and i32 %shift, 261632
+                  store i32 %mask, ptr inttoptr (i32 16384 to ptr)
+                  br label %latch
+                outside:
+                  %other = xor i32 %x, %y
+                  store i32 %other, ptr inttoptr (i32 16384 to ptr)
+                  br label %latch
+                latch:
+                  %nx = add i32 %x, 0
+                  %ny = add i32 %y, 0
+                  %next = add i16 %i, 1
+                  %more = icmp ult i16 %next, 3
+                  br i1 %more, label %header, label %exit
+                exit:
+                  ret i32 17
+                """.replace("PRED", predicate).replace("TRUE", predicate.equals("ult") ? "inside" : "outside")
+                    .replace("FALSE", predicate.equals("ult") ? "outside" : "inside")
+                    .replace("[ X,", "[ " + x + ",").replace("[ Y,", "[ " + y + ",");
+            String asm = checkAllocated("loop_bound_" + predicate + "_" + ci, body, expected);
+            sawUpperWords |= asm.matches("(?s).*\\bq(?:bc|de|hl)\\b.*");
+            sawRangeAddress |= asm.contains("sla 9, ");
+        }
+        require(sawUpperWords, "assembled bounds matrix must exercise upper-word fusion");
+        require(sawRangeAddress, "assembled bounds matrix must exercise range-aware shifts");
+
+        int[][] operands = {{65535, 1}, {0, -1}, {32768, 65535}, {32767, 32768}, {1, 65535}, {65534, 2}};
+        List<String> predicates = List.of("eq", "ne", "ult", "uge", "ugt", "ule");
+        for (String op : List.of("add", "sub", "and", "or", "xor")) for (int oi = 0; oi < operands.length; oi++) {
+            int value = operands[oi][0], rhs = operands[oi][1];
+            for (int i = 0; i < 3; i++) value = switch (op) {
+                case "add" -> value + rhs & 65535; case "sub" -> value - rhs & 65535;
+                case "and" -> value & rhs & 65535; case "or" -> (value | rhs) & 65535;
+                default -> (value ^ rhs) & 65535;
+            };
+            String pred = predicates.get(oi);
+            int comparison = switch (pred) {
+                case "eq" -> value == 65535 ? 1 : 0; case "ne" -> value != 65535 ? 1 : 0;
+                case "ult" -> value < 65535 ? 1 : 0; case "uge" -> value >= 65535 ? 1 : 0;
+                case "ugt" -> 0; default -> 1;
+            };
+            expected = SEED.clone();
+            for (int k = 0; k < 4; k++) {
+                expected[k] = (byte) (value >>> (8 * k));
+                expected[k + 4] = (byte) (comparison >>> (8 * k));
+            }
+            checkAllocated("loop_word_" + op + "_" + oi, """
+                entry:
+                  br label %header
+                header:
+                  %i = phi i16 [ 0, %entry ], [ %next, %header ]
+                  %v = phi i16 [ SEED, %entry ], [ %r, %header ]
+                  %r = OP i16 %v, RHS
+                  %wide = zext i16 %r to i32
+                  store i32 %wide, ptr inttoptr (i32 16384 to ptr)
+                  %test = icmp PRED i16 %r, -1
+                  %boolean = zext i1 %test to i32
+                  store i32 %boolean, ptr inttoptr (i32 16388 to ptr)
+                  %next = add i16 %i, 1
+                  %more = icmp ult i16 %next, 3
+                  br i1 %more, label %header, label %exit
+                exit:
+                  ret i32 17
+                """.replace("SEED", Integer.toString(operands[oi][0])).replace("OP", op)
+                    .replace("RHS", Integer.toString(rhs)).replace("PRED", pred), expected);
+        }
+        loopContextArguments();
+    }
+
+    private static void loopContextArguments() throws Exception {
+        String ir = """
+            define i32 @probe() {
+            entry:
+              call void @worker(ptr inttoptr (i32 16416 to ptr), i16 -2, i32 65539)
+              ret i32 17
+            }
+            define void @worker(ptr %p, i16 %seed, i32 %salt) {
+            entry:
+              %base = getelementptr i8, ptr %p, i32 0
+              %initial = add i16 %seed, 0
+              %narrow = trunc i32 %salt to i16
+              br label %header
+            header:
+              %pointer = phi ptr [ %base, %entry ], [ %pn, %header ]
+              %value = phi i16 [ %initial, %entry ], [ %sum, %header ]
+              %i = phi i16 [ 0, %entry ], [ %next, %header ]
+              %pn = getelementptr i8, ptr %pointer, i32 4
+              %sum = add i16 %value, %narrow
+              store i16 %sum, ptr %pn
+              %wide = zext i16 %sum to i32
+              store i32 %wide, ptr inttoptr (i32 16488 to ptr)
+              %next = add i16 %i, 1
+              %more = icmp ult i16 %next, 3
+              br i1 %more, label %header, label %exit
+            exit:
+              ret void
+            }
+            """;
+        byte[] expected = SEED.clone();
+        for (int i = 0; i < 3; i++) {
+            int value = (65534 + 3 * (i + 1)) & 65535;
+            expected[36 + i * 4] = (byte) value;
+            expected[37 + i * 4] = (byte) (value >>> 8);
+            for (int k = 0; k < 4; k++) expected[104 + k] = (byte) (value >>> (8 * k));
+        }
+        checkModule("loop_context_args", ir, 32, 17, expected);
+        var translator = new Ir2Tlcs900.Translator(ir, "probe");
+        translator.experimentalRegisterFunctions.add("worker");
+        String assembly = translator.translate().replaceAll("(?m)^\\s*include\\s+.*$", "")
+            .replace("; ---- code ----", "\torg 0200000h\n; ---- code ----");
+        require(assembly.contains("experimental loop frame"), "argument context actually allocated");
+        Files.writeString(output.resolve("loop_context_args_alloc.asm"), assembly);
+        fixtures.add(new Fixture("loop_context_args_alloc", 32, 17, expected));
+        Files.write(output.resolve("loop_context_args_alloc_opt.asm"), AsmOptimizer.runPasses(assembly.lines().toList(), false));
+        fixtures.add(new Fixture("loop_context_args_alloc_opt", 32, 17, expected));
+    }
+
     public static void main(String[] args) throws Exception {
         String[] packs = {"Classic Levels", "Classic II Levels", "Children's Pack",
                 "Confusion Pack", "Impossible Pack", "Panic Pack", "Twister Levels",
@@ -1505,7 +2105,9 @@ public final class Ir2Tlcs900CorrectnessTest {
         output = Files.createTempDirectory("ngpc-correctness-");
         for (int index = 0; index < SEED.length; index++) SEED[index] = (byte) (index + 1);
         System.out.println("Correctness test artifacts: " + output);
-        if (args.length > 0 && args[0].equals("--alu-folds-only")) {
+        if (args.length > 0 && args[0].equals("--direct-loads-only")) {
+            directLoadCopies();
+        } else if (args.length > 0 && args[0].equals("--alu-folds-only")) {
             aluFolds();
         } else if (args.length > 0 && args[0].equals("--gep-scratch-only")) {
             globalGepScratch();
@@ -1515,14 +2117,26 @@ public final class Ir2Tlcs900CorrectnessTest {
             volatileGlobal();
         } else if (args.length > 0 && args[0].equals("--allocator-only")) {
             loopAllocation();
+        } else if (args.length > 0 && args[0].equals("--loop-optimizations-only")) {
+            loopOptimizations();
         } else if (args.length > 0 && args[0].equals("--counter-only")) {
             counterComparisons();
+        } else if (args.length > 0 && args[0].equals("--branches-only")) {
+            comparisonBranches();
+        } else if (args.length > 0 && args[0].equals("--select-byte-only")) {
+            comparisonSelectsAndByteBranches();
+        } else if (args.length > 0 && args[0].equals("--store-select-only")) {
+            storeSelectCleanup();
         } else {
+            directLoadCopies();
             aluFolds();
             localArrays();
             nestedAddresses();
             if (args.length == 0 || !args[0].equals("--alloca-only")) {
                 booleans();
+                comparisonBranches();
+                comparisonSelectsAndByteBranches();
+                storeSelectCleanup();
                 arithmetic();
                 memory();
                 counterComparisons();
@@ -1542,6 +2156,12 @@ public final class Ir2Tlcs900CorrectnessTest {
         System.out.println("Assembling " + fixtures.size() + " raw/optimized fixtures");
         command("wine", "cmd", "/c", "assemble.bat");
         for (Fixture fixture : fixtures) {
+            if (fixture.name().startsWith("direct_load_") && fixture.name().endsWith("_1")) {
+                String raw = fixture.name().substring(0, fixture.name().length() - 1) + "0";
+                require(Files.size(output.resolve(raw + ".bin"))
+                    - Files.size(output.resolve(fixture.name() + ".bin")) == 2,
+                    fixture.name() + ": direct load must save the two-byte register copy");
+            }
             execute(fixture.name(), fixture.bits(), fixture.expected(), fixture.expectedMemory());
         }
         System.out.println("Ir2Tlcs900CorrectnessTest: PASS (" + executions + " assembled executions)");

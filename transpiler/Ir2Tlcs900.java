@@ -3891,6 +3891,16 @@ public class Ir2Tlcs900 {
                 for (int ii = 0; ii < bb.instrs().size(); ii++) {
                     currentInstrIndex = ii;
                     String instr = bb.instrs().get(ii);
+                    if (ii + 1 < bb.instrs().size()
+                            && emitImmediateComparisonBranch(instr, bb.instrs().get(ii + 1), argOffsets)) {
+                        ii++; // The branch was emitted together with its single-use comparison.
+                        continue;
+                    }
+                    if (ii + 1 < bb.instrs().size()
+                            && emitImmediateComparisonSelect(instr, bb.instrs().get(ii + 1), argOffsets)) {
+                        ii++; // Select consumes the comparison flags without a boolean home.
+                        continue;
+                    }
                     // Before this block's terminator, materialize any phi values that
                     // successor blocks expect from this predecessor (SSA phi lowering).
                     if (isTerminator(instr.strip())) {
@@ -4299,7 +4309,8 @@ public class Ir2Tlcs900 {
 
         void storeWAtoSlot(String name, int bits) {
             if (bits == 1) emit("and wa, 1");
-            else if (bits <= 8) emit("and wa, 0ffh");
+            else if (bits <= 8 && !isBranchOnlyByteValue(name) && !isByteOnlyStoreValue(name))
+                emit("and wa, 0ffh");
             // Register-only values are never spilled; the consumer reads WA directly.
             if (regOnly.contains(name)) { waSlotName = name; waSlotBits = bits; return; }
             // Register-promoted values go to XBC or XDE instead of the stack.
@@ -5092,6 +5103,7 @@ public class Ir2Tlcs900 {
         // -----------------------------------------------------------------------
         void emitLoad(String dst, String irType, String srcStr, Map<String, int[]> argOffsets) {
             int bits = irTypeBits(irType);
+            boolean normalizeByte = bits != 8 || !(isBranchOnlyByteValue(dst) || isByteOnlyStoreValue(dst));
             // Pointer load whose result is xhlOnly: load the address into XHL directly
             // so the consuming load/store can use (xhl+0) without a stack round-trip.
             if (xhlOnly.contains(dst) && irType.equals("ptr")) {
@@ -5105,7 +5117,7 @@ public class Ir2Tlcs900 {
             if (mITP.matches()) {
                 int addr = Integer.parseInt(mITP.group(1));
                 if (bits <= 8) {
-                    emit("ld wa, 0");   // clear high byte W before byte load
+                    if (normalizeByte) emit("ld wa, 0");
                     emit("ld a, (" + fmtAddr(addr) + ")");
                 } else if (bits <= 16) {
                     emit("ld wa, (" + fmtAddr(addr) + ")");
@@ -5131,7 +5143,7 @@ public class Ir2Tlcs900 {
                 long off = ceOff.getAsLong();
                 emit("lda xhl, " + sym);
                 if (off != 0) emit("add xhl, " + off);
-                if (bits <= 8)       { emit("ld wa, 0"); emit("ld a, (xhl+0)"); }
+                if (bits <= 8)       { if (normalizeByte) emit("ld wa, 0"); emit("ld a, (xhl+0)"); }
                 else if (bits <= 16)   emit("ld wa, (xhl+0)");
                 else                   emit("ld xwa, (xhl+0)");
                 storeWAtoSlot(dst, Math.min(bits, 32));
@@ -5142,7 +5154,7 @@ public class Ir2Tlcs900 {
             if (srcStr.startsWith("@")) {
                 String sym = "_" + srcStr.substring(1);
                 if (bits <= 8) {
-                    emit("ld wa, 0");   // clear high byte W before byte load
+                    if (normalizeByte) emit("ld wa, 0");
                     emit("ld a, (" + sym + ")");
                 } else if (bits <= 16) {
                     emit("ld wa, (" + sym + ")");
@@ -5165,7 +5177,7 @@ public class Ir2Tlcs900 {
                         if (bits <= 8) {
                             // Read the byte FIRST (WA still holds the index), then zero-extend.
                             emit("ld a, (xhl+wa)");
-                            emit("extz wa");
+                            if (normalizeByte) emit("extz wa");
                         } else if (bits <= 16) {
                             emit("ld wa, (xhl+wa)");
                         } else {
@@ -5178,7 +5190,7 @@ public class Ir2Tlcs900 {
                         return;
                     }
 
-                    if (bits <= 8)       { emit("ld wa, 0"); emit("ld a, (xhl+0)"); }
+                    if (bits <= 8)       { if (normalizeByte) emit("ld wa, 0"); emit("ld a, (xhl+0)"); }
                     else if (bits <= 16) emit("ld wa, (xhl+0)");
                     else                 emit("ld xwa, (xhl+0)");
                     xhlSlotName = null;
@@ -5191,35 +5203,35 @@ public class Ir2Tlcs900 {
                 // so this MUST run before the slots.containsKey() guard below â€"
                 // otherwise the load falls through to "load from unknown".
                 if (vname.equals(bcSlotName)) {
-                    if (bits <= 8)       { emit("ld wa, 0"); emit("ld a, b"); }
+                    if (bits <= 8)       { if (normalizeByte) emit("ld wa, 0"); emit("ld a, b"); }
                     else if (bits <= 16)   emit("ld wa, bc");
                     else                   emit("ld xwa, xbc");
                     storeWAtoSlot(dst, bits); return;
                 }
 
                 if (vname.equals(deSlotName)) {
-                    if (bits <= 8)       { emit("ld wa, 0"); emit("ld a, e"); }
+                    if (bits <= 8)       { if (normalizeByte) emit("ld wa, 0"); emit("ld a, e"); }
                     else if (bits <= 16)   emit("ld wa, de");
                     else                   emit("ld xwa, xde");
                     storeWAtoSlot(dst, bits); return;
                 }
 
                 if (vname.equals(ixSlotName)) {
-                    if (bits <= 8)       { emit("ld wa, ix"); emit("and wa, 0ffh"); }
+                    if (bits <= 8)       { emit("ld wa, ix"); if (normalizeByte) emit("and wa, 0ffh"); }
                     else if (bits <= 16)   emit("ld wa, ix");
                     else                   emit("ld xwa, xix");
                     storeWAtoSlot(dst, bits); return;
                 }
 
                 if (vname.equals(iySlotName)) {
-                    if (bits <= 8)       { emit("ld wa, iy"); emit("and wa, 0ffh"); }
+                    if (bits <= 8)       { emit("ld wa, iy"); if (normalizeByte) emit("and wa, 0ffh"); }
                     else if (bits <= 16)   emit("ld wa, iy");
                     else                   emit("ld xwa, xiy");
                     storeWAtoSlot(dst, bits); return;
                 }
 
                 if (vname.equals(izSlotName)) {
-                    if (bits <= 8)       { emit("ld wa, iz"); emit("and wa, 0ffh"); }
+                    if (bits <= 8)       { emit("ld wa, iz"); if (normalizeByte) emit("and wa, 0ffh"); }
                     else if (bits <= 16)   emit("ld wa, iz");
                     else                   emit("ld xwa, xiz");
                     storeWAtoSlot(dst, bits); return;
@@ -5230,14 +5242,14 @@ public class Ir2Tlcs900 {
                     if (bi >= 0) {
                         if (allocaSlots.contains(vname)) {
                             // Promoted scalar home: the register holds the value itself.
-                            if (bits <= 8)       { emit("ld wa, 0"); emit("ld a, " + BANK_REG_B[bi]); }
+                            if (bits <= 8)       { if (normalizeByte) emit("ld wa, 0"); emit("ld a, " + BANK_REG_B[bi]); }
                             else if (bits <= 16)   emit("ld wa, " + BANK_REG_R[bi]);
                             else                   emit("ld xwa, " + BANK_REG_X[bi]);
                             storeWAtoSlot(dst, bits); return;
                         }
                         // Genuine pointer value in the bank register: dereference via XHL.
                         emit("ld xhl, " + BANK_REG_X[bi]);
-                        if (bits <= 8)       { emit("ld wa, 0"); emit("ld a, (xhl+0)"); }
+                        if (bits <= 8)       { if (normalizeByte) emit("ld wa, 0"); emit("ld a, (xhl+0)"); }
                         else if (bits <= 16)   emit("ld wa, (xhl+0)");
                         else                   emit("ld xwa, (xhl+0)");
                         xhlSlotName = null;
@@ -5249,7 +5261,7 @@ public class Ir2Tlcs900 {
                     int off = slots.get(vname)[0];
                     if (allocaSlots.contains(vname)) {
                         if (bits <= 8)  {
-                            emit("ld wa, 0");   // clear high byte W before byte load
+                            if (normalizeByte) emit("ld wa, 0");
                             emit("ld a, (xsp+" + off + ")");
                         } else if (bits <= 16) {
                             emit("ld wa, (xsp+" + off + ")");
@@ -5262,7 +5274,7 @@ public class Ir2Tlcs900 {
                         // Pointer dereference
                         emit("ld xhl, (xsp+" + off + ")");
                         if (bits <= 8)  {
-                            emit("ld wa, 0");   // clear high byte W before byte load
+                            if (normalizeByte) emit("ld wa, 0");
                             emit("ld a, (xhl+0)");
                         } else if (bits <= 16) {
                             emit("ld wa, (xhl+0)");
@@ -5286,7 +5298,7 @@ public class Ir2Tlcs900 {
                     int total = frameSize + argOffsets.get(vname)[0];
                     emit("ld xhl, (xsp+" + total + ")");
                     if (bits <= 8)  {
-                        emit("ld wa, 0");   // clear high byte W before byte load
+                        if (normalizeByte) emit("ld wa, 0");
                         emit("ld a, (xhl+0)");
                     } else if (bits <= 16) {
                         emit("ld wa, (xhl+0)");
@@ -6771,6 +6783,22 @@ public class Ir2Tlcs900 {
         // -----------------------------------------------------------------------
         void emitIcmp(String dst, String pred, String itype, String lhs, String rhs,
                       Map<String, int[]> argOffsets) {
+            String cc = emitIcmpCompare(pred, itype, lhs, rhs, argOffsets);
+            emit("scc " + cc + ", a");
+            if (isFirstOfImmediateBooleanAnd(dst)) {
+                emit("ld l, a");
+                booleanAndLeftInL = dst;
+                waSlotName = null;
+                return;
+            }
+
+            // Materialized booleans need a clean byte value for cached wider reuse.
+            storeWAtoSlot(dst, 8);
+        }
+
+        /** Emit only the comparison; callers choose whether to materialize its boolean. */
+        String emitIcmpCompare(String pred, String itype, String lhs, String rhs,
+                               Map<String, int[]> argOffsets) {
             int bits = irTypeBits(itype);
             boolean isSigned = pred.equals("slt") || pred.equals("sgt")
                             || pred.equals("sle") || pred.equals("sge");
@@ -6805,7 +6833,7 @@ public class Ir2Tlcs900 {
                 emit("cp " + lhsReg + ", " + rhsReg);
             }
 
-            String cc = switch (pred) {
+            return switch (pred) {
                 case "eq"  -> "Z";
                 case "ne"  -> "NZ";
                 case "slt" -> "LT";
@@ -6818,18 +6846,146 @@ public class Ir2Tlcs900 {
                 case "uge" -> "NC";
                 default    -> "NZ";
             };
+        }
 
-            emit("scc " + cc + ", a");
-            if (isFirstOfImmediateBooleanAnd(dst)) {
-                emit("ld l, a");
-                booleanAndLeftInL = dst;
+        /** Fuse adjacent single-use icmp/br without exposing flags across another IR instruction. */
+        boolean emitImmediateComparisonBranch(String comparison, String branch,
+                                               Map<String, int[]> argOffsets) {
+            if (!comparison.contains("icmp")) return false;
+            Matcher cmp = Pattern.compile(
+                "%([^\\s,=]+)\\s*=\\s*icmp\\s+(?:samesign\\s+)?"
+                + "(eq|ne|slt|sgt|sle|sge|ult|ugt|ule|uge)\\s+(i8|i16|i32|ptr)"
+                + "\\s+(%?\\S+),\\s*(%?\\S+)").matcher(stripMeta(comparison.strip()));
+            if (!cmp.matches()) return false;
+            if (cmp.group(3).equals("ptr") && (!Set.of("eq", "ne").contains(cmp.group(2))
+                    || !(cmp.group(4).equals("null") || cmp.group(5).equals("null")))) return false;
+            Matcher br = Pattern.compile(
+                "br\\s+i1\\s+%([^\\s,]+),\\s*label\\s+%([\\w.]+),\\s*label\\s+%([\\w.]+)")
+                .matcher(stripMeta(branch.strip()));
+            if (!br.matches() || !cmp.group(1).equals(br.group(1))
+                    || valueUseCount(cmp.group(1)) != 1) return false;
+            String cc;
+            if (cmp.group(3).equals("i8") && Set.of("eq", "ne").contains(cmp.group(2))
+                    && parseImmediate(cmp.group(5)).orElse(-1) == 0) {
+                // Test only A: branch-only byte producers need not normalize W.
+                boolean resident = cmp.group(4).equals("%" + waSlotName);
+                loadToWA(cmp.group(4), "i8", argOffsets);
+                String last = out.isEmpty() ? "" : out.get(out.size() - 1).strip();
+                if (!resident || !last.matches("(?:and|or|xor|add|sub) a, .+|(?:inc|dec) \\d+, a"))
+                    emit("or a, a");
                 waSlotName = null;
-                return;
+                cc = cmp.group(2).equals("eq") ? "Z" : "NZ";
+            } else {
+                boolean nullLeft = cmp.group(3).equals("ptr") && cmp.group(4).equals("null");
+                cc = emitIcmpCompare(cmp.group(2), cmp.group(3),
+                    nullLeft ? cmp.group(5) : cmp.group(4), nullLeft ? "null" : cmp.group(5), argOffsets);
             }
+            emitFlagCondBr(cc, br.group(2), br.group(3), argOffsets);
+            return true;
+        }
 
-            // A is 0 or 1; W is already 0 from the preceding `ld wa,0` / `cp` sequence.
-            // Store as 8-bit boolean so emitCondBr can test with `or a,a` â€" no `ld w,0` needed.
-            storeWAtoSlot(dst, 8);
+        /** A private byte used only by a byte store (optionally through byte immediate arithmetic). */
+        boolean isByteOnlyStoreValue(String name) {
+            if (!regOnly.contains(name) || currentBlock == null || currentInstrIndex < 0
+                    || valueUseCount(name) != 1) return false;
+            int next = currentInstrIndex + 1;
+            List<String> instructions = currentBlock.instrs();
+            if (next >= instructions.size()) return false;
+            String input = name;
+            Matcher operation = Pattern.compile("%([\\w.]+)\\s*=\\s*(?:add|sub|and|or|xor)\\s+"
+                + "(?:(?:nuw|nsw|disjoint)\\s+)*i8\\s+%" + Pattern.quote(name) + ",\\s*-?\\d+")
+                .matcher(stripMeta(instructions.get(next).strip()));
+            if (operation.matches()) {
+                input = operation.group(1);
+                if (!regOnly.contains(input) || valueUseCount(input) != 1) return false;
+                next++;
+            }
+            return next < instructions.size() && stripMeta(instructions.get(next).strip()).matches(
+                "store\\s+(?:volatile\\s+)?i8\\s+%" + Pattern.quote(input) + ",\\s*ptr\\s+.+");
+        }
+
+        /** Only omit normalization for private byte values consumed by an immediate zero branch. */
+        boolean isBranchOnlyByteValue(String name) {
+            if (!regOnly.contains(name) || currentBlock == null || currentInstrIndex < 0
+                    || valueUseCount(name) != 1) return false;
+            int next = currentInstrIndex + 1;
+            List<String> instructions = currentBlock.instrs();
+            if (next >= instructions.size()) return false;
+            String input = name;
+            Matcher mask = Pattern.compile("%([\\w.]+)\\s*=\\s*and\\s+i8\\s+%"
+                + Pattern.quote(name) + ",\\s*(-?\\d+)")
+                .matcher(stripMeta(instructions.get(next).strip()));
+            if (mask.matches()) {
+                input = mask.group(1);
+                if (!regOnly.contains(input) || valueUseCount(input) != 1) return false;
+                next++;
+            }
+            if (next + 1 >= instructions.size()) return false;
+            Matcher cmp = Pattern.compile("%([\\w.]+)\\s*=\\s*icmp\\s+(?:samesign\\s+)?"
+                + "(?:eq|ne)\\s+i8\\s+%" + Pattern.quote(input) + ",\\s*0")
+                .matcher(stripMeta(instructions.get(next).strip()));
+            return cmp.matches() && valueUseCount(cmp.group(1)) == 1
+                && stripMeta(instructions.get(next + 1).strip()).matches("br\\s+i1\\s+%"
+                    + Pattern.quote(cmp.group(1)) + ",\\s*label\\s+%[\\w.]+,\\s*label\\s+%[\\w.]+");
+        }
+
+        /** Fuse adjacent single-use scalar icmp/select, preserving live WA operands before comparing. */
+        boolean emitImmediateComparisonSelect(String comparison, String select,
+                                               Map<String, int[]> argOffsets) {
+            if (!comparison.contains("icmp")) return false;
+            Matcher cmp = Pattern.compile("%([\\w.]+)\\s*=\\s*icmp\\s+(?:samesign\\s+)?"
+                + "(eq|ne|slt|sgt|sle|sge|ult|ugt|ule|uge)\\s+(i8|i16|i32)\\s+(%?\\S+),\\s*(%?\\S+)")
+                .matcher(stripMeta(comparison.strip()));
+            Matcher sel = Pattern.compile("%([\\w.]+)\\s*=\\s*select\\s+i1\\s+%([\\w.]+),\\s*"
+                + "(i1|i8|i16|i32)\\s+(%?\\S+),\\s*(i1|i8|i16|i32)\\s+(%?\\S+)")
+                .matcher(stripMeta(select.strip()));
+            if (!cmp.matches() || !sel.matches() || !cmp.group(1).equals(sel.group(2))
+                    || !sel.group(3).equals(sel.group(5)) || valueUseCount(cmp.group(1)) != 1) return false;
+            String trueV = sel.group(4), falseV = sel.group(6), type = sel.group(3);
+            boolean saveTrue = trueV.startsWith("%") && regOnly.contains(trueV.substring(1));
+            boolean saveFalse = falseV.startsWith("%") && regOnly.contains(falseV.substring(1));
+            // An XHL-only pointer or an unresident regOnly operand cannot be recovered after cp.
+            for (String value : List.of(trueV, falseV)) {
+                if (value.startsWith("%") && (xhlOnly.contains(value.substring(1))
+                        || regOnly.contains(value.substring(1)) && !value.substring(1).equals(waSlotName)))
+                    return false;
+            }
+            if (saveTrue || saveFalse) {
+                if (!slots.containsKey(SELSPILL_SLOT)) return false;
+                int off = slots.get(SELSPILL_SLOT)[0];
+                emit("ld (xsp+" + off + "), " + (irTypeBits(type) <= 16 ? "wa" : "xwa"));
+                if (saveTrue) trueV = "%" + SELSPILL_SLOT;
+                if (saveFalse) falseV = "%" + SELSPILL_SLOT;
+            }
+            String cc = emitIcmpCompare(cmp.group(2), cmp.group(3), cmp.group(4), cmp.group(5), argOffsets);
+            String skip = ".Lsel_f_" + sel.group(1), done = ".Lsel_d_" + sel.group(1);
+            // CP leaves its left operand in WA. When it is a selected arm of the same
+            // width, keep it as the default and only load the other arm when needed.
+            boolean keepTrue = type.equals(cmp.group(3)) && sel.group(4).equals(cmp.group(4));
+            boolean keepFalse = type.equals(cmp.group(3)) && sel.group(6).equals(cmp.group(4));
+            if (keepTrue || keepFalse) {
+                if (!(keepTrue && keepFalse)) {
+                    emit("jrl " + (keepTrue ? cc : invertCond(cc)) + ", " + done);
+                    waSlotName = null; xhlSlotName = null; xhlIndexPending = null;
+                    loadToWA(keepTrue ? falseV : trueV, type, argOffsets);
+                }
+                out.add(done + ":");
+                waSlotName = null; xhlSlotName = null; xhlIndexPending = null;
+                storeWAtoSlot(sel.group(1), irTypeBits(type));
+                return true;
+            }
+            emit("jrl " + invertCond(cc) + ", " + skip);
+            loadToWA(trueV, type, argOffsets);
+            emit("jrl " + done);
+            out.add(skip + ":");
+            // False-arm residency must not inherit writes made only by the true arm.
+            waSlotName = null; xhlSlotName = null; xhlIndexPending = null;
+            bcLive = null; deLive = null; ixLive = null; iyLive = null; izLive = null;
+            loadToWA(falseV, type, argOffsets);
+            out.add(done + ":");
+            waSlotName = null; xhlSlotName = null; xhlIndexPending = null;
+            storeWAtoSlot(sel.group(1), irTypeBits(type));
+            return true;
         }
 
         boolean isFirstOfImmediateBooleanAnd(String name) {
@@ -6995,46 +7151,62 @@ public class Ir2Tlcs900 {
                 return;
             }
 
+            emitFlagCondBr("NZ", tbb, fbb, argOffsets);
+        }
+
+        /** Choose the edge before emitting PHI copies, which may overwrite the flags. */
+        void emitFlagCondBr(String cc, String tbb, String fbb, Map<String, int[]> argOffsets) {
+            String inverse = invertCond(cc);
+            boolean tbbFallsThrough = tbb.equals(nextBBLabel);
+            boolean fbbFallsThrough = fbb.equals(nextBBLabel);
             List<PhiCopy> trueCopies = phiCopiesForEdge(currentBlock.label(), tbb);
             List<PhiCopy> falseCopies = phiCopiesForEdge(currentBlock.label(), fbb);
             if (trueCopies.isEmpty() && falseCopies.isEmpty()) {
-                emitCondBrJumps(tbb, fbb, tbbFallsThrough, fbbFallsThrough);
+                emitCondBrJumps(cc, tbb, fbb, tbbFallsThrough, fbbFallsThrough);
                 return;
             }
 
             if (trueCopies.isEmpty()) {
-                emit("jrl NZ, " + bbPrefix + tbb);
+                emit("jrl " + cc + ", " + bbPrefix + tbb);
                 emitPhiCopiesForEdge(currentBlock.label(), fbb, falseCopies, argOffsets);
                 emit("jrl " + bbPrefix + fbb);
                 return;
             }
 
             if (falseCopies.isEmpty()) {
-                emit("jrl Z, " + bbPrefix + fbb);
+                emit("jrl " + inverse + ", " + bbPrefix + fbb);
                 emitPhiCopiesForEdge(currentBlock.label(), tbb, trueCopies, argOffsets);
                 emit("jrl " + bbPrefix + tbb);
                 return;
             }
 
             String falseEdge = bbPrefix + "phi_edge_" + (phiEdgeLabelCtr++);
-            emit("jrl Z, " + falseEdge);
+            emit("jrl " + inverse + ", " + falseEdge);
             emitPhiCopiesForEdge(currentBlock.label(), tbb, trueCopies, argOffsets);
             emit("jrl " + bbPrefix + tbb);
             out.add(falseEdge + ":");
+            // The false edge cannot reuse residency established by the true edge's copies.
+            waSlotName = null; xhlSlotName = null; xhlIndexPending = null;
+            bcLive = null; deLive = null; ixLive = null; iyLive = null; izLive = null;
             emitPhiCopiesForEdge(currentBlock.label(), fbb, falseCopies, argOffsets);
             emit("jrl " + bbPrefix + fbb);
         }
 
         /** Emit the Z/NZ conditional jumps for a branch whose condition already set the Z flag. */
         void emitCondBrJumps(String tbb, String fbb, boolean tbbFallsThrough, boolean fbbFallsThrough) {
+            emitCondBrJumps("NZ", tbb, fbb, tbbFallsThrough, fbbFallsThrough);
+        }
+
+        void emitCondBrJumps(String cc, String tbb, String fbb,
+                             boolean tbbFallsThrough, boolean fbbFallsThrough) {
             if (fbbFallsThrough) {
                 // False branch falls through â€" only need the conditional jump for true.
-                emit("jrl NZ, " + bbPrefix + tbb);
+                emit("jrl " + cc + ", " + bbPrefix + tbb);
             } else if (tbbFallsThrough) {
                 // True branch falls through â€" only need the conditional jump for false.
-                emit("jrl Z, " + bbPrefix + fbb);
+                emit("jrl " + invertCond(cc) + ", " + bbPrefix + fbb);
             } else {
-                emit("jrl Z, " + bbPrefix + fbb);
+                emit("jrl " + invertCond(cc) + ", " + bbPrefix + fbb);
                 emit("jrl " + bbPrefix + tbb);
             }
         }
@@ -7436,9 +7608,10 @@ public class Ir2Tlcs900 {
                 loadToWA(trueV, typeT, argOffsets);
             }
 
-            storeWAtoSlot(dst, irTypeBits(typeT));
             emit("jrl " + doneLabel);
             out.add(skipLabel + ":");
+            waSlotName = null; xhlSlotName = null; xhlIndexPending = null;
+            bcLive = null; deLive = null; ixLive = null; iyLive = null; izLive = null;
             // False arm
             if (fAtRisk && selSpillReg != null) {
                 int soff = slots.get(SELSPILL_SLOT)[0];
@@ -7448,8 +7621,9 @@ public class Ir2Tlcs900 {
                 loadToWA(falseV, typeF, argOffsets);
             }
 
-            storeWAtoSlot(dst, irTypeBits(typeF));
             out.add(doneLabel + ":");
+            waSlotName = null; xhlSlotName = null; xhlIndexPending = null;
+            storeWAtoSlot(dst, irTypeBits(typeT));
         }
 
             boolean isSoleImmediateBranchUse(String name) {
@@ -7771,6 +7945,7 @@ public class Ir2Tlcs900 {
             out.add("");
             emitC9HRuntime(out);
             out.add("\tend");
+            out = AsmOptimizer.removeUnusedAllocatedBankSaves(out);
             List<String> finalOut = out;
             // Scoped allocator frames require whole-function fences, not just loop fences.
             {
@@ -10384,7 +10559,8 @@ public class Ir2Tlcs900 {
             // only when xwa[31:16] is definitely zero at the AND site.
             boolean sameRegCase = lhs.equals(andReg);
             boolean waToXwaCase = andReg.equals("wa") && lhs.equals("xwa") && xwaUpper16ZeroBefore[i];
-            if (!(sameRegCase || waToXwaCase)) continue;
+            boolean wideToByte = AsmOptimizer.lowByteMaskDefinesZero(andReg, lhs, mAnd.group(2));
+            if (!(sameRegCase || waToXwaCase || wideToByte)) continue;
             int k = j + 1;
             while (k < out.size() && out.get(k).matches("^\\s*(;.*)?$")) k++;
             if (k >= out.size() || pLabel.matcher(out.get(k).trim()).matches()) continue;
@@ -10392,6 +10568,7 @@ public class Ir2Tlcs900 {
             if (!mJ.matches()) continue;
             String cc = mJ.group(1).toUpperCase(Locale.ROOT);
             if (!(cc.equals("Z") || cc.equals("NZ") || cc.equals("EQ") || cc.equals("NE"))) continue;
+            if (wideToByte && !AsmOptimizer.flagsDeadOnBranchSuccessors(out, k, mJ.group(2).trim())) continue;
             drop[j] = true;
         }
 

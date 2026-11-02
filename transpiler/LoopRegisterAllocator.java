@@ -51,48 +51,133 @@ final class LoopRegisterAllocator {
         }
     }
 
+    /** Trim only an allocator-owned context with an exact mirrored prologue.
+     * Body slots keep their addresses; only the unused frame tail is reclaimed.
+     * Enclosing-frame input loads are shifted by both frame and save shrinkage.
+     */
+    static void compactLoopContext(List<String> lines, int frameSize) {
+        List<String> saved = new ArrayList<>();
+        int first = 0;
+        while (first < lines.size() && lines.get(first).startsWith("\tpush ")) {
+            String reg = lines.get(first++).substring(6);
+            if (!SAVED.contains(reg) || saved.contains(reg)) return;
+            saved.add(reg);
+        }
+        if (first >= lines.size() || !lines.get(first).equals("\tadd xsp, -" + frameSize + "\t; experimental loop frame")) return;
+        int end = lines.size() - saved.size() - 1;
+        if (end <= first || !lines.get(end).equals("\tadd xsp, " + frameSize)) return;
+        for (int i = 0; i < saved.size(); i++)
+            if (!lines.get(end + 1 + i).equals("\tpop " + saved.get(saved.size() - 1 - i))) return;
+        Pattern slot = Pattern.compile("\\(xsp\\+(\\d+)\\)");
+        int usedEnd = 0;
+        List<String> body = new ArrayList<>(lines.subList(first + 1, end));
+        for (String line : body) {
+            String code = line.split(";", 2)[0].strip();
+            if (code.isEmpty() || code.endsWith(":")) continue;
+            if (code.matches(".*\\b(?:sr|rfp|f)\\b.*")) return;
+            if (!code.matches("(?:ld|lda|add|sub|and|or|xor|sla|srl|sra|bit|cp|extz|exts|scc|inc|dec) .+")
+                    && !code.matches("jrl (?:\\w+, )?\\.[\\w.$]+")) return;
+            if (slot.matcher(code).replaceAll("").matches(".*\\b(?:xsp|sp|qsp)\\b.*")) return;
+            Matcher refs = slot.matcher(code);
+            while (refs.find()) {
+                int offset = Integer.parseInt(refs.group(1));
+                if (!code.startsWith("ld ")) return;
+                if (offset < frameSize) {
+                    if (offset + 4 > frameSize) return;
+                    usedEnd = Math.max(usedEnd, offset + 4);
+                } else if (offset < frameSize + 4 * saved.size()) return;
+            }
+        }
+        List<String> retained = new ArrayList<>();
+        for (String reg : saved) {
+            Pattern mentions = aliases(reg);
+            if (reg.matches("x(?:wa|bc|de|hl)[12]")) {
+                String pair = reg.substring(1, 3), bank = reg.substring(3);
+                mentions = Pattern.compile("\\b(?:" + reg + "|[rq]" + pair + bank
+                    + "|[rq][" + pair + "]" + bank + ")\\b");
+            }
+            Pattern finalMentions = mentions;
+            if (body.stream().anyMatch(l -> finalMentions.matcher(l.split(";", 2)[0]).find())) retained.add(reg);
+        }
+        int newFrame = (usedEnd + 3) & ~3;
+        int shrink = frameSize - newFrame + 4 * (saved.size() - retained.size());
+        List<String> result = new ArrayList<>();
+        for (String reg : retained) result.add("\tpush " + reg);
+        result.add("\tadd xsp, -" + newFrame + "\t; experimental loop frame");
+        for (String line : body) {
+            Matcher refs = slot.matcher(line);
+            StringBuilder patched = new StringBuilder();
+            while (refs.find()) {
+                int offset = Integer.parseInt(refs.group(1));
+                refs.appendReplacement(patched, "(xsp+" + (offset >= frameSize ? offset - shrink : offset) + ")");
+            }
+            refs.appendTail(patched);
+            result.add(patched.toString());
+        }
+        result.add("\tadd xsp, " + newFrame);
+        for (int i = retained.size() - 1; i >= 0; i--) result.add("\tpop " + retained.get(i));
+        lines.clear();
+        lines.addAll(result);
+    }
+
     private static Pattern aliases(String register) {
         String names = switch (register) {
-            case "xwa" -> "xwa|wa|w|a";
-            case "xbc" -> "xbc|bc|b|c";
-            case "xde" -> "xde|de|d|e";
-            case "xhl" -> "xhl|hl|h|l";
-            default -> register + "|" + register.substring(1);
+            case "xwa" -> "xwa|wa|qwa|w|a";
+            case "xbc" -> "xbc|bc|qbc|b|c";
+            case "xde" -> "xde|de|qde|d|e";
+            case "xhl" -> "xhl|hl|qhl|h|l";
+            default -> register + "|" + register.substring(1) + "|q" + register.substring(1);
         };
         return Pattern.compile("\\b(?:" + names + ")\\b");
     }
 
     private static boolean knownScratchInstruction(String line) {
         return line.isEmpty() || line.startsWith(";") || line.endsWith(":")
-            || line.matches("(?:ld|add|sub|and|or|xor|sla|srl|sra|bit|cp|extz|exts|scc|push|pop) .+")
+            || line.matches("(?:ld|add|sub|and|or|xor|sla|srl|sra|bit|cp|extz|exts|scc|inc|dec|push|pop) .+")
             || line.startsWith("jrl ");
     }
 
     private static boolean[] registerLive(List<String> lines, List<int[]> successors, String register) {
         Pattern references = aliases(register);
-        boolean[] live = new boolean[lines.size() + 1];
-        live[lines.size()] = true;
+        int[] live = new int[lines.size() + 1];
+        live[lines.size()] = -1;
+        Pattern assignment = Pattern.compile("(?:ld|pop) (\\w+)(?:, (.*))?");
         boolean changed;
         do {
             changed = false;
             for (int index = lines.size() - 1; index >= 0; index--) {
                 String line = lines.get(index).strip();
-                boolean kill = line.equals("pop " + register)
-                    || line.startsWith("ld " + register + ", ")
-                        && !references.matcher(line.substring(line.indexOf(',') + 1)).find();
-                boolean read = !knownScratchInstruction(line)
-                    || !kill && !line.endsWith(":") && !line.startsWith("jrl ")
-                        && references.matcher(line).find();
-                boolean value = read;
-                if (!kill)
-                    for (int successor : successors.get(index)) value |= live[successor];
+                int killed = 0, read = 0;
+                String operands = line;
+                Matcher write = assignment.matcher(line);
+                if (write.matches()) {
+                    if (references.matcher(write.group(1)).matches()) killed = aliasMask(write.group(1), register);
+                    operands = write.group(2) == null ? "" : write.group(2);
+                }
+                if (!knownScratchInstruction(line)) read = -1;
+                else if (!line.endsWith(":") && !line.startsWith("jrl ")) {
+                    Matcher mentioned = references.matcher(operands);
+                    while (mentioned.find()) read |= aliasMask(mentioned.group(), register);
+                }
+                int value = 0;
+                for (int successor : successors.get(index)) value |= live[successor];
+                value = read | (value & ~killed);
                 if (value != live[index]) {
                     live[index] = value;
                     changed = true;
                 }
             }
         } while (changed);
-        return live;
+        boolean[] result = new boolean[live.length];
+        for (int i = 0; i < live.length; i++) result[i] = live[i] != 0;
+        return result;
+    }
+
+    private static int aliasMask(String alias, String register) {
+        if (alias.equals(register)) return -1;
+        if (alias.equals(register.substring(1))) return 0xffff;
+        if (alias.equals("q" + register.substring(1))) return 0xffff0000;
+        return Set.of("w", "b", "d", "h").contains(alias) ? 0xff00 : 0xff;
     }
 
     static void forwardScratchValues(List<String> lines) {
@@ -163,6 +248,7 @@ final class LoopRegisterAllocator {
                 while (operands.find()) {
                     String alias = operands.group();
                     String scratch = alias.equals(register) ? "xwa"
+                        : alias.equals("q" + register.substring(1)) ? "qwa"
                         : alias.equals(register.substring(1)) ? "wa"
                         : Set.of("b", "d", "h").contains(alias) ? "w" : "a";
                     operands.appendReplacement(replacement, scratch);
@@ -357,15 +443,22 @@ final class LoopRegisterAllocator {
         final Map<String, Integer> slots = new LinkedHashMap<>();
         final Map<String, Integer> writes = new LinkedHashMap<>();
         final Map<String, Integer> uses = new LinkedHashMap<>();
+        record PhiEdge(String phi, String predecessor) {}
+        record Address(String base, int offset) {}
+        final Map<PhiEdge, Integer> phiOffsets = new LinkedHashMap<>();
+        final Map<String, Set<String>> dominators = new LinkedHashMap<>();
+        final Map<String, Set<String>> predecessors = new LinkedHashMap<>();
         int scratch, copies, frameSize;
         final int maxPhiCopies;
         int edgeNumber;
 
         Plan(List<Block> blocks, String header, String exit,
              List<Ir2Tlcs900.FuncTranslator.BasicBlock> source) {
-            this.blocks = blocks;
             this.header = header;
             this.exit = exit;
+            // Extend the base's SSA lifetime BEFORE interference/coalescing. Deferring
+            // a GEP after allocation would allow its base register to be reused early.
+            this.blocks = blocks = deferAddresses(blocks);
             Set<String> local = new LinkedHashSet<>();
             for (Block block : blocks) {
                 labels.add(block.label);
@@ -433,6 +526,7 @@ final class LoopRegisterAllocator {
                 writes.put(value, 0);
                 uses.put(value, 0);
             }
+            buildDominators();
             buildInterference();
             for (Block block : blocks)
                 for (Instruction instr : block.instructions) {
@@ -459,6 +553,118 @@ final class LoopRegisterAllocator {
                 .filter(i -> i.op.equals("phi")).count()).max().orElse(0);
             maxPhiCopies = maxCopies;
             layoutFrame(Set.of());
+        }
+
+        private List<Block> deferAddresses(List<Block> original) {
+            Map<String, Address> addresses = new LinkedHashMap<>();
+            for (Block block : original) for (Instruction instr : block.instructions) {
+                if (!instr.op.equals("gep") || !instr.operands.get(0).startsWith("%")) continue;
+                OptionalLong index = Ir2Tlcs900.parseImmediate(instr.operands.get(1));
+                if (index.isEmpty()) continue;
+                int offset = (int) (index.getAsLong() * (bits(instr.operands.get(2)) / 8));
+                if (offset < Short.MIN_VALUE || offset > Short.MAX_VALUE) continue;
+                boolean safe = true;
+                for (Block consumerBlock : original) for (Instruction consumer : consumerBlock.instructions) {
+                    for (int i = 0; i < consumer.operands.size(); i++) {
+                        if (!consumer.operands.get(i).equals(instr.name)) continue;
+                        if (!(consumer.op.equals("load") && i == 0
+                                || consumer.op.equals("store") && i == 1)) safe = false;
+                    }
+                    for (Incoming incoming : consumer.incoming) {
+                        if (!incoming.value.equals(instr.name)) continue;
+                        if (!consumer.op.equals("phi") || !consumer.type.equals("ptr")
+                                || !consumerBlock.label.equals(header)
+                                || !consumer.name.equals(instr.operands.get(0))) safe = false;
+                    }
+                }
+                if (safe) addresses.put(instr.name, new Address(instr.operands.get(0), offset));
+            }
+            List<Block> result = new ArrayList<>();
+            for (Block block : original) {
+                List<Instruction> rewritten = new ArrayList<>();
+                for (Instruction instr : block.instructions) {
+                    if (addresses.containsKey(instr.name)) continue;
+                    if (instr.op.equals("phi")) {
+                        List<Incoming> incoming = new ArrayList<>();
+                        for (Incoming edge : instr.incoming) {
+                            Address address = addresses.get(edge.value);
+                            if (address == null) incoming.add(edge);
+                            else {
+                                incoming.add(new Incoming(address.base, edge.predecessor));
+                                phiOffsets.put(new PhiEdge(instr.name, edge.predecessor), address.offset);
+                            }
+                        }
+                        instr = new Instruction(instr.name, instr.op, instr.type,
+                            instr.operands, incoming, instr.successors);
+                    } else if (instr.op.equals("load") || instr.op.equals("store")) {
+                        int index = instr.op.equals("load") ? 0 : 1;
+                        Address address = addresses.get(instr.operands.get(index));
+                        if (address != null) {
+                            List<String> operands = new ArrayList<>(instr.operands);
+                            operands.set(index, address.base);
+                            operands.add(Integer.toString(address.offset));
+                            instr = new Instruction(instr.name, instr.op + ":offset", instr.type,
+                                operands, instr.incoming, instr.successors);
+                        }
+                    }
+                    rewritten.add(instr);
+                }
+                result.add(new Block(block.label, rewritten));
+            }
+            return result;
+        }
+
+        private void buildDominators() {
+            for (Block block : blocks) {
+                predecessors.put(block.label, new LinkedHashSet<>());
+                dominators.put(block.label, new LinkedHashSet<>(block.label.equals(header) ? Set.of(header) : labels));
+            }
+            for (Block block : blocks) for (String next : block.instructions.get(block.instructions.size() - 1).successors)
+                if (labels.contains(next)) predecessors.get(next).add(block.label);
+            boolean changed;
+            do {
+                changed = false;
+                for (Block block : blocks) {
+                    if (block.label.equals(header)) continue;
+                    Set<String> dom = new LinkedHashSet<>(labels);
+                    if (predecessors.get(block.label).isEmpty()) dom.clear();
+                    for (String pred : predecessors.get(block.label)) dom.retainAll(dominators.get(pred));
+                    dom.add(block.label);
+                    if (!dom.equals(dominators.get(block.label))) {
+                        dominators.put(block.label, dom);
+                        changed = true;
+                    }
+                }
+            } while (changed);
+        }
+
+        private Instruction definition(String value) {
+            for (Block block : blocks) for (Instruction instr : block.instructions)
+                if (value.equals(instr.name)) return instr;
+            return null;
+        }
+
+        // A single-entry in-bounds successor must dominate the use. An OR below
+        // an unsigned bound proves that each operand separately is below it.
+        private long unsignedBound(String value, String at) {
+            long bound = 1L << 32;
+            for (Block block : blocks) {
+                Instruction br = block.instructions.get(block.instructions.size() - 1);
+                if (!br.op.equals("branch") || br.successors.size() != 2) continue;
+                Instruction cmp = definition(br.operands.get(0));
+                if (cmp == null || !Set.of("cmp:ult", "cmp:uge").contains(cmp.op)
+                        || !cmp.operands.get(2).equals("i32")) continue;
+                Instruction or = definition(cmp.operands.get(0));
+                OptionalLong limit = Ir2Tlcs900.parseImmediate(cmp.operands.get(1));
+                if (or == null || !or.op.equals("or") || !or.type.equals("i32")
+                        || !or.operands.contains(value) || limit.isEmpty()) continue;
+                long upper = limit.getAsLong() & 0xffffffffL;
+                String inside = br.successors.get(cmp.op.equals("cmp:ult") ? 0 : 1);
+                if (upper != 0 && labels.contains(inside) && !inside.equals(header)
+                        && predecessors.get(inside).equals(Set.of(block.label))
+                        && dominators.get(at).contains(inside)) bound = Math.min(bound, upper);
+            }
+            return bound;
         }
 
         /**
@@ -597,9 +803,19 @@ final class LoopRegisterAllocator {
                         live.remove(instr.name);
                         if (!Set.of("phi", "trunc", "zext").contains(instr.op))
                             writes.merge(instr.name, 1, Integer::sum);
+                        else if (instr.op.equals("phi") && instr.incoming.stream().anyMatch(edge ->
+                                phiOffsets.getOrDefault(new PhiEdge(instr.name, edge.predecessor), 0) != 0))
+                            writes.merge(instr.name, 1, Integer::sum);
                     }
                     live.addAll(instr.uses());
                     for (String use : instr.uses()) uses.merge(use, 1, Integer::sum);
+                    // A banked memory base needs materialization at each access.
+                    // Prefer primary homes for addresses whose arithmetic we sank;
+                    // narrow counters can use direct low-word bank operations.
+                    if (Set.of("load:offset", "store:offset").contains(instr.op)) {
+                        String address = instr.operands.get(instr.op.equals("load:offset") ? 0 : 1);
+                        if (types.containsKey(address)) uses.merge(address, 3, Integer::sum);
+                    }
                     for (Incoming incoming : instr.incoming)
                         if (labels.contains(incoming.predecessor) && incoming.value.startsWith("%"))
                             uses.merge(incoming.value, 1, Integer::sum);
@@ -783,6 +999,53 @@ final class LoopRegisterAllocator {
                 for (int ii = 0; ii < block.instructions.size(); ii++) {
                     Instruction instr = block.instructions.get(ii);
                     if (instr.op.equals("phi")) continue;
+                    if (instr.op.equals("or") && instr.type.equals("i32") && uses.get(instr.name) == 1
+                            && ii + 2 < block.instructions.size()) {
+                        Instruction cmp = block.instructions.get(ii + 1), br = block.instructions.get(ii + 2);
+                        OptionalLong limit = cmp.operands.size() < 2 ? OptionalLong.empty()
+                            : Ir2Tlcs900.parseImmediate(cmp.operands.get(1));
+                        String left = homes.get(instr.operands.get(0)), right = homes.get(instr.operands.get(1));
+                        if (Set.of("cmp:ult", "cmp:uge").contains(cmp.op)
+                                && cmp.operands.get(0).equals(instr.name) && cmp.operands.get(2).equals("i32")
+                                && uses.get(cmp.name) == 1 && br.op.equals("branch")
+                                && br.operands.equals(List.of(cmp.name)) && limit.isPresent()
+                                && (limit.getAsLong() & 0xffff) == 0 && (limit.getAsLong() & 0xffffffffL) != 0
+                                && Set.of("xbc", "xde", "xhl").contains(left == null ? "" : left)
+                                && Set.of("xbc", "xde", "xhl").contains(right == null ? "" : right)) {
+                            String dest = target(instr.name).substring(1);
+                            output.add("\tld " + dest + ", q" + left.substring(1));
+                            output.add("\tor " + dest + ", q" + right.substring(1));
+                            output.add("\tcp " + dest + ", " + Ir2Tlcs900.fmtImm((limit.getAsLong() & 0xffffffffL) >>> 16));
+                            branch(output, prefix, block.label, br, condition(cmp.op.substring(4)));
+                            ii += 2;
+                            continue;
+                        }
+                    }
+                    if (instr.op.equals("shl") && instr.type.equals("i32") && uses.get(instr.name) == 1
+                            && ii + 1 < block.instructions.size()) {
+                        Instruction next = block.instructions.get(ii + 1);
+                        OptionalLong mask = next.operands.size() < 2 ? OptionalLong.empty()
+                            : Ir2Tlcs900.parseImmediate(next.operands.get(1));
+                        int shift = Integer.parseInt(instr.operands.get(1));
+                        if (next.op.equals("and") && next.type.equals("i32")
+                                && next.operands.get(0).equals(instr.name) && mask.isPresent() && shift > 0) {
+                            long value = mask.getAsLong() & 0xffffffffL, unshifted = value >>> shift;
+                            int drop = Long.numberOfTrailingZeros(unshifted);
+                            int width = 64 - Long.numberOfLeadingZeros(unshifted);
+                            if (drop > 0 && drop <= 16 && drop + shift <= 16 && width + shift <= 32
+                                    && value == (unshifted << shift)
+                                    && unshifted == ((1L << width) - (1L << drop))
+                                    && unsignedBound(instr.operands.get(0), block.label) <= (1L << width)) {
+                                String dest = target(next.name);
+                                load(output, dest, instr.operands.get(0));
+                                output.add("\tsrl " + drop + ", " + dest);
+                                output.add("\tsla " + (drop + shift) + ", " + dest);
+                                store(output, next.name, dest);
+                                ii++;
+                                continue;
+                            }
+                        }
+                    }
                     if (instr.op.equals("shl") && instr.type.equals("i32")
                             && instr.operands.get(1).equals("16") && uses.get(instr.name) == 1
                             && ii + 1 < block.instructions.size()) {
@@ -832,10 +1095,11 @@ final class LoopRegisterAllocator {
                     if (instr.op.equals("trunc") && uses.get(instr.name) == 1
                             && ii + 1 < block.instructions.size()) {
                         Instruction next = block.instructions.get(ii + 1);
-                        if (next.op.equals("store") && next.operands.get(0).equals(instr.name)) {
+                        if (Set.of("store", "store:offset").contains(next.op) && next.operands.get(0).equals(instr.name)) {
+                            List<String> operands = new ArrayList<>(next.operands);
+                            operands.set(0, instr.operands.get(0));
                             instruction(output, prefix, block.label,
-                                new Instruction(null, "store", next.type,
-                                    List.of(instr.operands.get(0), next.operands.get(1)), List.of(), List.of()));
+                                new Instruction(null, next.op, next.type, operands, List.of(), List.of()));
                             ii++;
                             continue;
                         }
@@ -844,7 +1108,7 @@ final class LoopRegisterAllocator {
                         Instruction next = block.instructions.get(ii + 1);
                         if (next.op.equals("branch") && next.operands.equals(List.of(instr.name))
                                 && uses.get(instr.name) == 1) {
-                            compare(output, instr);
+                            compare(output, instr, ii > 0 && wordScratchResult(block.instructions.get(ii - 1), instr.operands.get(0)));
                             branch(output, prefix, block.label, next, condition(instr.op.substring(4)));
                             ii++;
                             continue;
@@ -863,6 +1127,7 @@ final class LoopRegisterAllocator {
             mergeCommonTails(output.subList(start, output.size()));
             forwardScratchValues(output.subList(start, output.size()));
             eliminateRegisterRoundTrips(output.subList(start, output.size()));
+            compactLoopContext(output.subList(start, output.size()), frameSize);
         }
         private String slot(String value) { return "(xsp+" + slots.get(value) + ")"; }
         private String operand(String value) {
@@ -905,7 +1170,33 @@ final class LoopRegisterAllocator {
                     }
             return false;
         }
-        private void compare(List<String> out, Instruction instr) {
+        private String wordOperand(String value) {
+            if (types.containsKey(value)) {
+                String home = homes.get(value);
+                return home == null ? slot(value) : Arrays.asList(PRIMARY).contains(home)
+                    ? home.substring(1) : "r" + home.substring(1);
+            }
+            return Ir2Tlcs900.fmtImm(Ir2Tlcs900.parseImmediate(value).orElseThrow() & 0xffff);
+        }
+        private boolean wordCoalesced(Instruction instr) {
+            return instr.type != null && instr.type.equals("i16")
+                && Set.of("add", "sub", "and", "or", "xor").contains(instr.op)
+                && homes.get(instr.name) != null && "i16".equals(types.get(instr.operands.get(0)))
+                && homes.get(instr.name).equals(homes.get(instr.operands.get(0)));
+        }
+        private boolean wordScratchResult(Instruction instr, String value) {
+            return value.equals(instr.name) && wordCoalesced(instr) && target(instr.name).equals("xwa");
+        }
+        private void compare(List<String> out, Instruction instr) { compare(out, instr, false); }
+        private void compare(List<String> out, Instruction instr, boolean scratchAvailable) {
+            if (instr.operands.get(2).equals("i16")) {
+                String home = homes.get(instr.operands.get(0));
+                String lhs = Arrays.asList(PRIMARY).contains(home) ? home.substring(1) : "wa";
+                if (!Arrays.asList(PRIMARY).contains(home) && !scratchAvailable)
+                    out.add("\tld wa, " + wordOperand(instr.operands.get(0)));
+                out.add("\tcp " + lhs + ", " + wordOperand(instr.operands.get(1)));
+                return;
+            }
             String lhs = homes.get(instr.operands.get(0));
             if (!Arrays.asList(PRIMARY).contains(lhs)) {
                 load(out, "xwa", instr.operands.get(0));
@@ -928,6 +1219,19 @@ final class LoopRegisterAllocator {
             };
         }
         private void binary(List<String> out, String name, String type, String op, String lhs, String rhs) {
+            Instruction instr = new Instruction(name, op, type, List.of(lhs, rhs), List.of(), List.of());
+            if (wordCoalesced(instr)) {
+                String home = homes.get(name), dest = target(name).substring(1);
+                if (dest.equals("wa")) out.add("\tld wa, " + wordOperand(lhs));
+                OptionalLong constant = Ir2Tlcs900.parseImmediate(rhs);
+                // INC/DEC word forms are safe here: LLVM does not expose CPU flags.
+                if (Set.of("add", "sub").contains(op) && constant.isPresent()
+                        && constant.getAsLong() >= 1 && constant.getAsLong() <= 8)
+                    out.add("\t" + (op.equals("add") ? "inc" : "dec") + " " + constant.getAsLong() + ", " + dest);
+                else out.add("\t" + op + " " + dest + ", " + wordOperand(rhs));
+                if (dest.equals("wa")) out.add("\tld r" + home.substring(1) + ", wa");
+                return;
+            }
             String dest = target(name);
             if (dest.equals(operand(rhs)) && !dest.equals(operand(lhs))) {
                 if (op.equals("sub")) {
@@ -1023,22 +1327,24 @@ final class LoopRegisterAllocator {
                     }
                     store(out, i.name, dest);
                 }
-                case "load" -> {
+                case "load", "load:offset" -> {
+                    int offset = i.op.equals("load:offset") ? Integer.parseInt(a.get(1)) : 0;
                     String address = homes.get(a.get(0));
                     if (bits(i.type) == 8 && Arrays.asList(PRIMARY).contains(address)) {
                         out.add("\tld xwa, 0");
-                        out.add("\tld a, (" + address + ")");
+                        out.add("\tld a, " + memoryAddress(address, offset));
                         store(out, i.name, "xwa");
                         break;
                     }
                     load(out, "xwa", a.get(0));
                     String dest = bits(i.type) == 8 ? "a" : bits(i.type) == 16 ? "wa" : "xwa";
-                    out.add("\tld " + dest + ", (xwa)");
+                    out.add("\tld " + dest + ", " + memoryAddress("xwa", offset));
                     if (bits(i.type) == 8) out.add("\textz wa");
                     if (bits(i.type) < 32) out.add("\textz xwa");
                     store(out, i.name, "xwa");
                 }
-                case "store" -> {
+                case "store", "store:offset" -> {
+                    int offset = i.op.equals("store:offset") ? Integer.parseInt(a.get(2)) : 0;
                     String value = homes.get(a.get(0));
                     String address = homes.get(a.get(1));
                     if (Arrays.asList(PRIMARY).contains(value)
@@ -1049,14 +1355,14 @@ final class LoopRegisterAllocator {
                         }
                         String source = bits(i.type) == 32 ? value : bits(i.type) == 16
                             ? value.substring(1) : value.equals("xbc") ? "c" : value.equals("xde") ? "e" : "l";
-                        out.add("\tld (" + address + "), " + source);
+                        out.add("\tld " + memoryAddress(address, offset) + ", " + source);
                         break;
                     }
                     load(out, "xwa", a.get(1));
                     out.add("\tld (xsp+" + scratch + "), xhl");
                     load(out, "xhl", a.get(0));
                     String source = bits(i.type) == 8 ? "l" : bits(i.type) == 16 ? "hl" : "xhl";
-                    out.add("\tld (xwa), " + source);
+                    out.add("\tld " + memoryAddress("xwa", offset) + ", " + source);
                     out.add("\tld xhl, (xsp+" + scratch + ")");
                 }
                 case "branch" -> branch(out, prefix, block, i, null);
@@ -1069,6 +1375,9 @@ final class LoopRegisterAllocator {
                     store(out, i.name, "xwa");
                 }
             }
+        }
+        private static String memoryAddress(String register, int offset) {
+            return "(" + register + (offset == 0 ? "" : offset > 0 ? "+" + offset : Integer.toString(offset)) + ")";
         }
         private static void signExtend(List<String> out, String type) {
             if (type.equals("i1")) {
@@ -1117,6 +1426,8 @@ final class LoopRegisterAllocator {
                 String value = incoming(ready, from);
                 String dest = target(ready.name);
                 load(out, dest, value);
+                int offset = phiOffsets.getOrDefault(new PhiEdge(ready.name, from), 0);
+                if (offset != 0) out.add("\tadd " + dest + ", " + Ir2Tlcs900.fmtImm(offset & 0xffffffffL));
                 if (!types.containsKey(value)) canonical(out, dest, ready.type);
                 store(out, ready.name, dest);
                 remaining.remove(ready);
@@ -1125,6 +1436,8 @@ final class LoopRegisterAllocator {
             for (Instruction phi : remaining) {
                 String value = incoming(phi, from);
                 load(out, "xwa", value);
+                int offset = phiOffsets.getOrDefault(new PhiEdge(phi.name, from), 0);
+                if (offset != 0) out.add("\tadd xwa, " + Ir2Tlcs900.fmtImm(offset & 0xffffffffL));
                 if (!types.containsKey(value)) canonical(out, "xwa", phi.type);
                 out.add("\tld (xsp+" + (copies + pending.size() * 4) + "), xwa");
                 pending.add(phi);
@@ -1146,7 +1459,8 @@ final class LoopRegisterAllocator {
         private List<Instruction> copiesFor(String from, String to) {
             return blocks.stream().filter(b -> b.label.equals(to))
                 .flatMap(b -> b.instructions.stream()).filter(i -> i.op.equals("phi"))
-                .filter(i -> !location(i.name).equals(location(incoming(i, from)))).toList();
+                .filter(i -> phiOffsets.getOrDefault(new PhiEdge(i.name, from), 0) != 0
+                    || !location(i.name).equals(location(incoming(i, from)))).toList();
         }
     }
     private static int bits(String type) { return type.equals("ptr") ? 32 : Integer.parseInt(type.substring(1)); }
