@@ -237,7 +237,7 @@ public final class VexedTest {
                 for (int part = 0; part < 4; part++) {
                     int number = block >= 254 ? 0 : (block & 127) * 2 + 1
                             + (part & 1) + (part / 2) * 29;
-                    int expected = paletteTile("_gems_palidx", number, -1);
+                    int expected = number == 0 ? 0 : paletteTile("_gems_palidx", number, -1);
                     int address = 0x9000 + 2 * ((row * 2 + part / 2) * 32
                             + column * 2 + 3 + (part & 1));
                     require(memory.readWord(address) == expected, String.format(
