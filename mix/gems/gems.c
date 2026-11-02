@@ -29,7 +29,8 @@ const u8 gems_lvl_values[] = {5,6,7,8};
 
 void gems_setTile(u16* plane,u16 x,u16 y,u16 tile)
 {
-    plane[y*32+x] = tile+(((u16)gems_palidx[tile-1])<<9);
+    /* Tile zero clears the cell and has no palette entry. */
+    plane[y*32+x] = tile ? tile+(((u16)gems_palidx[tile-1])<<9) : 0;
 }
 
 void gems_print(const char *s,u16 x,u16 y,u8 dir)
