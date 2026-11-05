@@ -27,6 +27,29 @@ public final class AsmOptimizerDirectLoadTest {
     }
 
     public static void main(String[] args) {
+        for (String temporary : List.of("xwa", "xbc", "xde", "xhl", "xix", "xiy", "xiz")) {
+            for (String family : List.of("xwa", "xbc", "xde", "xhl")) {
+                for (int bank = 0; bank < 4; bank++) {
+                    String destination = family + bank;
+                    folded(probe("ld " + temporary + ", 0a0h", "ld " + destination + ", " + temporary,
+                        "ld " + temporary + ", 0"), "ld " + destination + ", 0a0h");
+                }
+            }
+        }
+        retained(probe("ld xwa, 0a0h", "ld xwa1, xwa", "push xwa", "ld xwa, 0"));
+        retained(probe("ld xwa, 0a0h", "ld xwa1, xwa", "ld wa, 0", "push xwa", "ld xwa, 0"));
+        retained(probe("ld xwa, 0a0h", "ld xwa1, xwa", "ldf 1", "ld xwa, 0"));
+        retained(probe("ld xwa, (xix)", "ld xwa1, xwa", "ld xwa, 0"));
+        retained(probe("ld xwa, xbc", "ld xwa1, xwa", "ld xwa, 0"));
+        retained(probe("ld xwa, 7", "ld xwa4, xwa", "ld xwa, 0"));
+        retained(probe("ld wa, 7", "ld xwa1, wa", "ld wa, 0"));
+        List<String> bankEntry = probe("ld xwa, 7", "ld xwa1, xwa", "ld xwa, 0");
+        bankEntry.add(2, ".Lentry:");
+        retained(bankEntry);
+        List<String> bankPipeline = List.of("_probe:", "\tld xwa, 0a0h", "\tld xwa1, xwa",
+            "\tld xwa, 0", "\tret");
+        require(AsmOptimizer.runPasses(bankPipeline, false).contains("\tld xwa1, 0a0h"),
+            "bank immediate enabled in pipeline");
         for (String source : List.of("1", "-1", "012345678h", "0x1234", "_track",
                 "(_track)", "(04000h)", "(xsp+172)", "(xix)", "(xhl+wa)", "(xbc-4)", "xde", "xde1")) {
             folded(probe("ld xwa, " + source, "ld xbc, xwa", "ld xwa, 0"), "ld xbc, " + source);

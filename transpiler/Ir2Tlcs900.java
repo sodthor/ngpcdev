@@ -7945,7 +7945,9 @@ public class Ir2Tlcs900 {
             out.add("");
             emitC9HRuntime(out);
             out.add("\tend");
+            out = AsmOptimizer.forwardAllocatedCounters(out);
             out = AsmOptimizer.removeUnusedAllocatedBankSaves(out);
+            out = AsmOptimizer.compactAllocatedFrames(out);
             List<String> finalOut = out;
             // Scoped allocator frames require whole-function fences, not just loop fences.
             {
@@ -10316,13 +10318,49 @@ public class Ir2Tlcs900 {
     }
 
     static boolean maskedBranchAccumulatorDeadAfter(List<String> lines, int start) {
-        Pattern load = Pattern.compile("(?i)^ld\\s+xwa,\\s*(.+)$");
-        Pattern alias = Pattern.compile("(?i)\\b(?:xwa|wa|w|a)\\b");
-        for (int index = start + 1; index < lines.size(); index++) {
-            String instruction = lines.get(index).split(";", 2)[0].strip();
-            if (instruction.isEmpty()) continue;
-            Matcher overwrite = load.matcher(instruction);
-            return overwrite.matches() && !alias.matcher(overwrite.group(1)).find();
+        // SCC A and the word mask change only the low word, not QWA. Track
+        // individual lanes so a successor's LD WA is a sufficient overwrite.
+        return registerLanesDeadFrom(lines, start + 1, "xwa", 0xffff);
+    }
+
+    static boolean registerLanesDeadFrom(List<String> lines, int first, String register, int pending) {
+        String low = register.substring(1);
+        Map<String, Integer> aliases = new HashMap<>();
+        aliases.put(register, -1); aliases.put(low, 0xffff); aliases.put("q" + low, 0xffff0000);
+        if (Set.of("wa", "bc", "de", "hl").contains(low)) {
+            aliases.put(low.substring(0, 1), 0xff00); aliases.put(low.substring(1), 0xff);
+        }
+        Pattern tokens = Pattern.compile("\\b(?:" + String.join("|", aliases.keySet()) + ")\\b");
+        Set<Integer> visited = new HashSet<>();
+        int index = first;
+        while (index < lines.size() && visited.add(index)) {
+            String instruction = lines.get(index).split(";", 2)[0].strip().toLowerCase(Locale.ROOT);
+            if (instruction.isEmpty() || instruction.startsWith(".") && instruction.endsWith(":")) {
+                index++; continue;
+            }
+            if (instruction.matches(".*\\b(?:sr|rfp|f)\\b.*")) return false;
+            Matcher jump = Pattern.compile("(?:jr|jrl) (\\.[\\w.$]+)").matcher(instruction);
+            if (jump.matches()) {
+                int target = -1;
+                for (int i = 0; i < lines.size(); i++)
+                    if (lines.get(i).split(";", 2)[0].strip().equalsIgnoreCase(jump.group(1) + ":")) { target = i; break; }
+                if (target < 0) return false;
+                index = target + 1; continue;
+            }
+            if (!instruction.matches("(?:ld|lda|pop|push|add|sub|and|or|xor|cp|bit|extz|exts|sla|srl|sra|inc|dec|scc) .+")) return false;
+            String reads = instruction;
+            int killed = 0;
+            Matcher overwrite = Pattern.compile("(?:ld|lda) (\\w+), (.+)|pop (\\w+)").matcher(instruction);
+            if (overwrite.matches()) {
+                String destination = overwrite.group(1) != null ? overwrite.group(1) : overwrite.group(3);
+                killed = aliases.getOrDefault(destination, 0);
+                reads = overwrite.group(2) == null ? "" : overwrite.group(2);
+            }
+            Matcher read = tokens.matcher(reads);
+            while (read.find()) if ((pending & aliases.get(read.group())) != 0) return false;
+            pending &= ~killed;
+            if (pending == 0) return true;
+            index++;
         }
         return false;
     }
@@ -10339,14 +10377,19 @@ public class Ir2Tlcs900 {
                 continue;
             }
             if (asmConsumesFlags(lower)) return false;
-            if (asmClobbersFlags(lower) && !lower.startsWith("bit ")) return true;
+            // The generic asmClobbersFlags helper proves S/Z, not every status
+            // bit. A shift cannot discharge the removed mask/test's H/N flags.
+            if (lower.matches("(?:cp|add|sub|and|or|xor|neg) .+")) return true;
             if (lower.matches(".*\\b(?:sr|f|rfp)\\b.*")) return false;
             Matcher branch = jump.matcher(instruction);
             if (branch.matches()) {
                 int target = lines.indexOf(branch.group(1) + ":");
                 if (target < 0) return false;
                 index = target + 1;
-            } else if (asmNeutralForFlags(lower) && !lower.startsWith("pop ")
+            } else if ((asmNeutralForFlags(lower) || lower.matches("(?:extz|exts) \\w+")
+                    // INC/DEC do not consume incoming flags. Treat them as a
+                    // partial overwrite and keep searching for a full overwrite.
+                    || lower.matches("(?:inc|dec) [1-8], (?:x?(?:wa|bc|de|hl)[12]?|x?i[xyz])")) && !lower.startsWith("pop ")
                     && !lower.equals("di") && !lower.equals("ei")) {
                 index++;
             } else {

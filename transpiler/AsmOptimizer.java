@@ -142,6 +142,136 @@ public class AsmOptimizer {
     // Helper effects are checked using the complete generated module here, so
     // standalone fence-local optimization does not depend on outside context.
     static List<String> removeUnusedAllocatedBankSaves(List<String> lines) {
+        return rewriteAllocatedContexts(lines, false);
+    }
+
+    /** Repack only private, nonescaping outer frames of allocated functions.
+     * Four-byte cells retain alignment; accesses from nested contexts are mapped
+     * using their proven stack delta, not their textual displacement.
+     */
+    static List<String> compactAllocatedFrames(List<String> lines) {
+        return rewriteAllocatedContexts(lines, true);
+    }
+
+    /** Forward an outer counter without changing its outgoing accumulator or
+     * compare flags. The speculative exit-side counter must die before a read.
+     * Keep LD XWA,counter: deleting it would need a separate ABI/live-out proof.
+     */
+    static List<String> forwardAllocatedCounters(List<String> lines) {
+        List<String> out = new ArrayList<>(lines);
+        List<String> module = lines.stream().map(l -> l.split(";", 2)[0].strip()).filter(l -> !l.isEmpty()).toList();
+        List<ProtectedFunction> functions = protectedFunctions(lines);
+        for (int fi = functions.size() - 1; fi >= 0; fi--) {
+            ProtectedFunction function = functions.get(fi);
+            List<Integer> positions = new ArrayList<>();
+            List<String> code = new ArrayList<>();
+            for (int i = function.start + 1; i < function.end - 1; i++) {
+                String core = out.get(i).split(";", 2)[0].strip();
+                if (!core.isEmpty()) { positions.add(i); code.add(core); }
+            }
+            int frameLine = 1, saves = 0;
+            while (frameLine < code.size() && code.get(frameLine).startsWith("push ")) { frameLine++; saves++; }
+            if (frameLine >= code.size()) continue;
+            Matcher frame = Pattern.compile("add xsp, -(\\d+)").matcher(code.get(frameLine));
+            int end = code.size() - saves - 2;
+            if (!frame.matches() || end <= frameLine || !code.get(end).equals("add xsp, " + frame.group(1))) continue;
+            int bytes = Integer.parseInt(frame.group(1));
+            Map<Integer, Integer> depths = contextDepths(code, frameLine + 1, end, module);
+            if (depths == null) continue;
+            Pattern copy = Pattern.compile("ld xwa, (x(?:bc|de|hl|ix|iy|iz))");
+            for (int i = end - 7; i > frameLine; i--) {
+                Matcher load = copy.matcher(code.get(i));
+                if (!load.matches() || !code.get(i + 1).equals("add xwa, 1")) continue;
+                String counter = load.group(1);
+                Matcher store = Pattern.compile("ld \\(xsp\\+(\\d+)\\), xwa").matcher(code.get(i + 2));
+                Matcher compare = Pattern.compile("cp xwa, (\\w+)").matcher(code.get(i + 3));
+                Matcher branch = Pattern.compile("(?:jr|jrl) (\\w+), (\\.[\\w.$]+)").matcher(code.get(i + 4));
+                if (!store.matches() || !compare.matches() || !branch.matches()) continue;
+                boolean indirect = code.get(i + 5).equals("ld xwa, (xsp+" + store.group(1) + ")")
+                    && code.get(i + 6).equals("ld " + counter + ", xwa");
+                if (!(indirect || code.get(i + 5).equals("ld " + counter + ", (xsp+" + store.group(1) + ")"))) continue;
+                int backedge = i + (indirect ? 7 : 6);
+                if (backedge >= end || !code.get(backedge).matches("(?:jr|jrl) \\.[\\w.$]+")) continue;
+                int target = code.indexOf(branch.group(2) + ":");
+                if (target < 0 || !Ir2Tlcs900.registerLanesDeadFrom(code, target + 1, counter, -1)) continue;
+                // No control-flow entry may bypass the original producer/compare.
+                int slot = Integer.parseInt(store.group(1)) + depths.get(i + 2);
+                if (slot < 0 || slot + 4 > bytes) continue;
+                boolean safe = true;
+                for (int j = frameLine + 1; j < end; j++) {
+                    Matcher refs = Pattern.compile("\\(xsp\\+(\\d+)\\)").matcher(code.get(j));
+                    while (refs.find()) {
+                        int offset = Integer.parseInt(refs.group(1)) + depths.get(j);
+                        int width = contextMemoryBytes(code.get(j));
+                        if (width == 0 || offset < slot + 4 && offset + width > slot && j != i + 2 && j != i + 5) safe = false;
+                    }
+                }
+                if (!safe) continue;
+                out.set(positions.get(i), "\tadd " + counter + ", 1");
+                out.set(positions.get(i + 1), "\tld xwa, " + counter);
+                out.set(positions.get(i + 3), "\tcp " + counter + ", " + compare.group(1));
+                if (indirect) out.remove((int) positions.get(i + 6));
+                out.remove((int) positions.get(i + 5));
+                out.remove((int) positions.get(i + 2));
+                // Recompute positions and stack analysis before another candidate.
+                return forwardAllocatedCounters(out);
+            }
+        }
+        return out;
+    }
+
+    private static Map<Integer, Integer> contextDepths(List<String> code, int first, int end, List<String> module) {
+        Map<String, Integer> labels = new HashMap<>();
+        for (int i = first; i <= end; i++)
+            if (code.get(i).endsWith(":")) labels.put(code.get(i).substring(0, code.get(i).length() - 1), i);
+        for (String label : labels.keySet()) {
+            Pattern reference = Pattern.compile("(?<![\\w.$])" + Pattern.quote(label) + "(?![\\w.$])");
+            long local = code.subList(first, end).stream().filter(l -> reference.matcher(l).find()).count();
+            long total = module.stream().filter(l -> reference.matcher(l).find()).count();
+            if (local != total) return null; // extra entry or address escape outside the function
+        }
+        Map<Integer, Integer> depths = new HashMap<>();
+        ArrayDeque<int[]> work = new ArrayDeque<>();
+        work.add(new int[]{first, 0});
+        while (!work.isEmpty()) {
+            int[] state = work.removeFirst();
+            int i = state[0], delta = state[1];
+            if (i == end) { if (delta != 0) return null; else continue; }
+            if (i < first || i > end) return null;
+            Integer previous = depths.putIfAbsent(i, delta);
+            if (previous != null) { if (previous != delta) return null; else continue; }
+            String instruction = code.get(i);
+            if (instruction.endsWith(":")) { work.add(new int[]{i + 1, delta}); continue; }
+            if (instruction.matches(".*\\b(?:sr|rfp|f|sp|qsp)\\b.*")) return null;
+            if (instruction.startsWith("lda ") && instruction.contains("xsp")) return null;
+            if (instruction.startsWith("call ")) {
+                if (!divisionFallbackAt(code, i - 3) || !divisionPreservesBank(module)
+                        || !divisionUsesPrivateStack(module)) return null;
+            } else if (!instruction.matches("(?:ld|lda|add|sub|adc|sbc|and|or|xor|cp|sla|srl|sra|extz|exts|bit|scc|inc|dec|divs|push|pop|jr|jrl) .+")) return null;
+            if (instruction.replaceAll("\\(xsp\\+\\d+\\)", "").contains("xsp")
+                    && !instruction.matches("(?:add xsp, -?\\d+|(?:inc|dec) \\d+, xsp)")) return null;
+            Matcher push = Pattern.compile("(push|pop) (\\w+)").matcher(instruction);
+            if (push.matches()) {
+                int width = contextRegisterBytes(push.group(2));
+                if (width == 0) return null;
+                delta += push.group(1).equals("push") ? -width : width;
+            }
+            Matcher adjust = Pattern.compile("add xsp, (-?\\d+)|(?:inc|dec) (\\d+), xsp").matcher(instruction);
+            if (adjust.matches()) delta += adjust.group(1) != null ? Integer.parseInt(adjust.group(1))
+                : Integer.parseInt(adjust.group(2)) * (instruction.startsWith("dec ") ? -1 : 1);
+            if (delta > 0) return null;
+            Matcher branch = Pattern.compile("(?:jr|jrl) (?:(\\w+),\\s*)?(\\.[\\w.$]+)").matcher(instruction);
+            if (instruction.startsWith("jr")) {
+                if (!branch.matches() || !labels.containsKey(branch.group(2))) return null;
+                work.add(new int[]{labels.get(branch.group(2)), delta});
+                if (branch.group(1) == null) continue;
+            }
+            work.add(new int[]{i + 1, delta});
+        }
+        return depths.size() == end - first ? depths : null;
+    }
+
+    private static List<String> rewriteAllocatedContexts(List<String> lines, boolean compact) {
         List<String> out = new ArrayList<>(lines);
         List<String> module = lines.stream().map(l -> l.split(";", 2)[0].strip())
             .filter(l -> !l.isEmpty()).toList();
@@ -166,6 +296,7 @@ public class AsmOptimizer {
             Matcher frame = Pattern.compile("add xsp, -(\\d+)").matcher(code.get(frameLine));
             if (!frame.matches() || !code.get(code.size() - 1).equals("ret")) continue;
             int bytes = Integer.parseInt(frame.group(1));
+            if (compact && bytes % 4 != 0) continue;
             int end = code.size() - saved.size() - 2;
             if (end <= frameLine || !code.get(end).equals("add xsp, " + bytes)) continue;
             boolean mirrored = true;
@@ -173,18 +304,6 @@ public class AsmOptimizer {
                 mirrored &= code.get(end + 1 + i).equals("pop " + saved.get(saved.size() - 1 - i));
             if (!mirrored) continue;
             List<String> body = code.subList(frameLine + 1, end);
-            boolean known = true;
-            for (String instruction : body) {
-                if (instruction.endsWith(":")) continue;
-                if (instruction.matches(".*\\b(?:sr|rfp|f|qsp|sp)\\b.*")) { known = false; break; }
-                if (instruction.startsWith("call ")) {
-                    if (!instruction.equals("call _C9H_divls") || !divisionPreservesBank(module)) known = false;
-                } else if (!instruction.matches("(?:ld|lda|add|sub|adc|sbc|and|or|xor|cp|sla|srl|sra|extz|exts|bit|scc|inc|dec|divs|push|pop|jr|jrl) .+"))
-                    known = false;
-                if (instruction.replaceAll("\\(xsp\\+\\d+\\)", "").contains("xsp")
-                        && !instruction.matches("(?:add xsp, -?\\d+|(?:inc|dec) \\d+, xsp)")) known = false;
-            }
-            if (!known) continue;
             Set<String> unused = new LinkedHashSet<>();
             for (String reg : saved) {
                 if (!reg.matches("x(?:wa|bc|de|hl)[12]")) continue;
@@ -192,40 +311,47 @@ public class AsmOptimizer {
                 Pattern alias = Pattern.compile("\\b(?:" + reg + "|[rq]" + pair + bank + "|[rq][" + pair + "]" + bank + ")\\b");
                 if (body.stream().noneMatch(l -> alias.matcher(l).find())) unused.add(reg);
             }
-            if (unused.isEmpty()) continue;
-            Map<String, Integer> labels = new HashMap<>();
-            for (int i = frameLine + 1; i < end; i++)
-                if (code.get(i).endsWith(":")) labels.put(code.get(i).substring(0, code.get(i).length() - 1), i);
-            Map<Integer, Integer> depth = new HashMap<>();
-            ArrayDeque<int[]> pending = new ArrayDeque<>();
-            pending.add(new int[]{frameLine + 1, 0});
+            if (!compact && unused.isEmpty()) continue;
+            Map<Integer, Integer> depth = contextDepths(code, frameLine + 1, end, module);
+            if (depth == null) continue;
             boolean balanced = true;
-            while (!pending.isEmpty() && balanced) {
-                int[] state = pending.removeFirst();
-                int i = state[0], delta = state[1];
-                if (i == end) { if (delta != 0) balanced = false; continue; }
-                if (i < frameLine + 1 || i > end) { balanced = false; break; }
-                Integer previous = depth.putIfAbsent(i, delta);
-                if (previous != null) { if (previous != delta) balanced = false; continue; }
-                String instruction = code.get(i);
-                Matcher stack = Pattern.compile("(?:push|pop) (\\w+)").matcher(instruction);
-                if (stack.matches()) {
-                    int width = contextRegisterBytes(stack.group(1));
-                    if (width == 0) { balanced = false; break; }
-                    delta += instruction.startsWith("push ") ? -width : width;
-                }
-                Matcher adjust = Pattern.compile("add xsp, (-?\\d+)|(?:inc|dec) (\\d+), xsp").matcher(instruction);
-                if (adjust.matches()) delta += adjust.group(1) != null ? Integer.parseInt(adjust.group(1))
-                    : Integer.parseInt(adjust.group(2)) * (instruction.startsWith("dec ") ? -1 : 1);
-                Matcher branch = Pattern.compile("(?:jr|jrl) (?:(\\w+), )?(\\.[\\w.$]+)").matcher(instruction);
-                if (instruction.startsWith("jr")) {
-                    if (!branch.matches() || !labels.containsKey(branch.group(2))) { balanced = false; break; }
-                    pending.add(new int[]{labels.get(branch.group(2)), delta});
-                    if (branch.group(1) != null) pending.add(new int[]{i + 1, delta});
-                } else pending.add(new int[]{i + 1, delta});
+            // Relocating XSP can change flags from any stack adjustment, not
+            // just the outer prologue. Include nested allocator contexts.
+            if (compact || !unused.isEmpty()) {
+                boolean flagsSafe = stackFlagsDeadAfter(code, frameLine);
+                for (int i = frameLine + 1; i < end && flagsSafe; i++)
+                    if (code.get(i).matches("add xsp, -?\\d+")) flagsSafe = stackFlagsDeadAfter(code, i);
+                if (!flagsSafe) continue;
             }
-            if (!balanced || depth.size() != end - frameLine - 1) continue;
-            int removedBytes = 4 * unused.size();
+            boolean[] used = new boolean[bytes];
+            for (int i = frameLine + 1; i < end && balanced; i++) {
+                Matcher refs = Pattern.compile("\\(xsp\\+(\\d+)\\)").matcher(code.get(i));
+                while (refs.find()) {
+                    int normalized = Integer.parseInt(refs.group(1)) + depth.get(i);
+                    int width = contextMemoryBytes(code.get(i));
+                    if (width == 0 || normalized < 0 && (normalized < depth.get(i) || normalized + width > 0)
+                            || normalized >= 0 && normalized < bytes && normalized + width > bytes
+                            || normalized >= bytes && normalized < bytes + saveBytes + 4) {
+                        balanced = false; break;
+                    }
+                    if (normalized >= 0 && normalized < bytes)
+                        for (int b = normalized; b < normalized + width; b++) used[b] = true;
+                }
+            }
+            if (!balanced) continue;
+            int[] remap = new int[bytes];
+            int newBytes = 0;
+            for (int cell = 0; cell < bytes; cell += 4) {
+                boolean keep = !compact;
+                for (int b = cell; b < Math.min(cell + 4, bytes); b++) keep |= used[b];
+                if (keep) {
+                    for (int b = cell; b < Math.min(cell + 4, bytes); b++) remap[b] = newBytes + b - cell;
+                    newBytes += Math.min(4, bytes - cell);
+                }
+            }
+            int frameShrink = bytes - newBytes;
+            int removedBytes = frameShrink + 4 * unused.size();
+            if (removedBytes == 0) continue;
             Map<Integer, String> patched = new HashMap<>();
             for (int i = frameLine + 1; i < end && balanced; i++) {
                 Matcher refs = Pattern.compile("\\(xsp\\+(\\d+)\\)").matcher(out.get(positions.get(i)));
@@ -233,23 +359,21 @@ public class AsmOptimizer {
                 while (refs.find()) {
                     int offset = Integer.parseInt(refs.group(1));
                     int normalized = offset + depth.get(i);
-                    Matcher load = Pattern.compile("ld ([^,]+), (.+)").matcher(code.get(i));
-                    int width = 0;
-                    if (load.matches()) {
-                        String reg = load.group(load.group(1).startsWith("(") ? 2 : 1);
-                        width = contextRegisterBytes(reg);
-                        if (reg.matches("[wabcdehl]|[rq][wabcdehl][12]")) width = 1;
-                    }
-                    if (width == 0 || normalized + width > bytes && normalized < bytes + saveBytes + 4) {
-                        balanced = false; break;
-                    }
-                    refs.appendReplacement(replacement, "(xsp+" + (normalized >= bytes + saveBytes + 4 ? offset - removedBytes : offset) + ")");
+                    int adjusted = normalized >= bytes + saveBytes + 4 ? offset - removedBytes
+                        : normalized >= 0 ? remap[normalized] - depth.get(i) : offset;
+                    // Keep the currently accepted positive signed-16 displacement form.
+                    if (adjusted < 0 || adjusted > Short.MAX_VALUE) { balanced = false; break; }
+                    refs.appendReplacement(replacement, "(xsp+" + adjusted + ")");
                 }
                 refs.appendTail(replacement);
                 patched.put(positions.get(i), replacement.toString());
             }
             if (!balanced) continue;
             for (var entry : patched.entrySet()) out.set(entry.getKey(), entry.getValue());
+            if (frameShrink != 0) {
+                out.set(positions.get(frameLine), "\tadd xsp, -" + newBytes + "\t; frame: " + newBytes + " bytes");
+                out.set(positions.get(end), "\tadd xsp, " + newBytes + "\t; free frame");
+            }
             Set<Integer> removed = new HashSet<>();
             for (int i = 0; i < saved.size(); i++) if (unused.contains(saved.get(i))) {
                 removed.add(positions.get(i + 1));
@@ -263,7 +387,131 @@ public class AsmOptimizer {
     private static int contextRegisterBytes(String reg) {
         if (reg.matches("x(?:wa|bc|de|hl)[12]?|x(?:ix|iy|iz)")) return 4;
         if (reg.matches("(?:wa|bc|de|hl|ix|iy|iz)|[rq](?:wa|bc|de|hl)[12]")) return 2;
+        if (reg.matches("[wabcdehl]|[rq][wabcdehl][12]")) return 1;
         return 0;
+    }
+
+    private static int contextMemoryBytes(String instruction) {
+        if (instruction.startsWith("bit ")) return 1;
+        Matcher operation = Pattern.compile("(?:ld|add|sub|adc|sbc|and|or|xor|cp) ([^,]+), (.+)").matcher(instruction);
+        if (!operation.matches()) return 0;
+        return contextRegisterBytes(operation.group(operation.group(1).startsWith("(") ? 2 : 1));
+    }
+
+    /** Bank neutrality alone is insufficient for moving the enclosing stack.
+     * Each helper may access only its own pushed bytes and its eight argument
+     * bytes, never the return address or its caller's locals/saves.
+     */
+    private static boolean divisionUsesPrivateStack(List<String> module) {
+        for (String name : List.of("_C9H_divls", "_C9H_divlu")) {
+            int first = module.indexOf(name + ":");
+            if (first < 0) { if (name.endsWith("divls")) return false; else continue; }
+            int end = first + 1;
+            while (end < module.size() && !module.get(end).matches("_[\\w.$]+:")
+                    && !module.get(end).equals("end")) end++;
+            Map<String, Integer> labels = new HashMap<>();
+            for (int i = first + 1; i < end; i++)
+                if (module.get(i).endsWith(":")) labels.put(module.get(i).substring(0, module.get(i).length() - 1), i);
+            Map<Integer, Integer> depths = new HashMap<>();
+            ArrayDeque<int[]> work = new ArrayDeque<>();
+            work.add(new int[]{first + 1, 0});
+            while (!work.isEmpty()) {
+                int[] state = work.removeFirst();
+                int i = state[0], delta = state[1];
+                if (i >= end || delta > 0) return false;
+                Integer previous = depths.putIfAbsent(i, delta);
+                if (previous != null) { if (previous != delta) return false; else continue; }
+                String instruction = module.get(i);
+                if (instruction.equals("ret")) { if (delta != 0) return false; else continue; }
+                Matcher refs = Pattern.compile("\\(xsp\\+(\\d+)\\)").matcher(instruction);
+                while (refs.find()) {
+                    int offset = Integer.parseInt(refs.group(1)) + delta;
+                    int width = contextMemoryBytes(instruction);
+                    if (width == 0 || !(offset >= delta && offset + width <= 0
+                            || offset >= 4 && offset + width <= 12)) return false;
+                }
+                Matcher push = Pattern.compile("(push|pop) (\\w+)").matcher(instruction);
+                if (push.matches()) {
+                    int width = contextRegisterBytes(push.group(2));
+                    if (width == 0) return false;
+                    delta += push.group(1).equals("push") ? -width : width;
+                }
+                Matcher adjust = Pattern.compile("add xsp, (-?\\d+)").matcher(instruction);
+                if (adjust.matches()) {
+                    if (!stackFlagsDeadAfter(module.subList(first, end), i - first)) return false;
+                    delta += Integer.parseInt(adjust.group(1));
+                }
+                if (instruction.startsWith("call ") && !(instruction.equals("call _C9H_divlu")
+                        && i >= first + 3 && module.get(i - 2).equals("push xwa")
+                        && module.get(i - 1).equals("push xbc")
+                        && i + 1 < end && module.get(i + 1).equals("add xsp, 8"))) return false;
+                Matcher branch = Pattern.compile("(?:jr|jrl) (?:(\\w+),\\s*)?(\\.[\\w.$]+)").matcher(instruction);
+                if (branch.matches()) {
+                    Integer target = labels.get(branch.group(2));
+                    if (target == null) return false;
+                    work.add(new int[]{target, delta});
+                    if (branch.group(1) == null) continue;
+                }
+                work.add(new int[]{i + 1, delta});
+            }
+        }
+        return true;
+    }
+
+    /** Track only flags possibly changed by relocating a stack ADD. BIT proves
+     * Z independently, but must not be mistaken for a full carry overwrite.
+     * Returns/calls do not promise flags in the compiler ABI; unknown calls are
+     * nevertheless barriers here. Further stack ADDs cannot kill this taint.
+     */
+    private static boolean stackFlagsDeadAfter(List<String> code, int start) {
+        Map<String, Integer> labels = new HashMap<>();
+        for (int i = 0; i < code.size(); i++) if (code.get(i).endsWith(":"))
+            labels.put(code.get(i).substring(0, code.get(i).length() - 1), i);
+        record State(int index, int flags) {}
+        ArrayDeque<State> work = new ArrayDeque<>();
+        Set<State> seen = new HashSet<>();
+        work.add(new State(start + 1, 63)); // C,Z,S,V,H,N
+        while (!work.isEmpty()) {
+            State state = work.removeFirst();
+            int i = state.index(), flags = state.flags();
+            if (i >= code.size() || seen.size() > 1000) return false;
+            if (!seen.add(state)) continue;
+            String instruction = code.get(i).toLowerCase(Locale.ROOT);
+            if (instruction.endsWith(":")) { work.add(new State(i + 1, flags)); continue; }
+            if (instruction.matches(".*\\b(?:sr|rfp|f)\\b.*")) return false;
+            if (instruction.equals("ret")) continue;
+            if (instruction.matches("(?:cp|add|sub|and|or|xor) .+") && !instruction.startsWith("add xsp,")) continue;
+            if (instruction.matches("(?:adc|sbc) .+")) {
+                if ((flags & 1) != 0) return false;
+                continue;
+            }
+            if (instruction.startsWith("bit ")) flags &= ~2;
+            Matcher branch = Pattern.compile("(?:jr|jrl) (?:(\\w+),\\s*)?(\\.[\\w.$]+)").matcher(instruction);
+            if (branch.matches()) {
+                Integer target = null;
+                for (var entry : labels.entrySet()) if (entry.getKey().equalsIgnoreCase(branch.group(2))) target = entry.getValue();
+                if (target == null) return false;
+                if (branch.group(1) != null) {
+                    int read = switch (branch.group(1)) {
+                        case "c", "nc", "ult", "uge" -> 1;
+                        case "z", "nz", "eq", "ne" -> 2;
+                        case "m", "p", "mi", "pl" -> 4;
+                        case "v", "nv", "ov", "nov", "pe", "po" -> 8;
+                        case "lt", "ge" -> 4 | 8;
+                        case "gt", "le" -> 2 | 4 | 8;
+                        case "ugt", "ule" -> 1 | 2;
+                        default -> 63;
+                    };
+                    if ((flags & read) != 0) return false;
+                    work.add(new State(i + 1, flags));
+                }
+                work.add(new State(target, flags));
+            } else if (instruction.matches("(?:ld|lda|push|pop|extz|exts|inc|dec|bit) .+")
+                    || instruction.matches("add xsp, -?\\d+")) {
+                work.add(new State(i + 1, flags));
+            } else return false;
+        }
+        return true;
     }
 
     static List<ProtectedFunction> protectedFunctions(List<String> lines) {
@@ -1416,6 +1664,9 @@ public class AsmOptimizer {
     // preserving memory access order and effective-address inputs. Ordinary
     // destinations have the same load encoding/cost; a register copy is saved.
     // No stack-pointer destinations, mixed widths, or auto-update addresses.
+    // Numeric immediates may also target absolute 32-bit bank registers. Keep
+    // other sources restricted to ordinary destinations: banked addressing
+    // encodings and RFP-dependent source aliases need separate proofs.
     // Safe inside experimental functions: the adjacent copy has no intervening
     // instruction or entry point, and no live temporary value is lost. Local
     // labels/branches are traversed only in the dead-
@@ -1439,7 +1690,10 @@ public class AsmOptimizer {
             Matcher copy = load.matcher(out.get(j));
             if (!copy.matches() || !copy.group(3).equalsIgnoreCase(temporary)) continue;
             String destination = copy.group(2).toLowerCase(Locale.ROOT);
-            if (directLoadRegisterWidth(destination) != width
+            boolean bankImmediate = width == 32
+                    && destination.matches("x(?:wa|bc|de|hl)[0-3]")
+                    && parseAsmImmediate(source).isPresent();
+            if ((!bankImmediate && directLoadRegisterWidth(destination) != width)
                     || registerAliases(temporary).contains(destination)
                     || !loadTemporaryDeadAfter(out, j, temporary)) continue;
             out.set(i, first.group(1) + "ld " + destination + ", " + source
@@ -3874,7 +4128,7 @@ public class AsmOptimizer {
     private static boolean divisionFallbackAt(List<String> code, int index) {
         List<String> division = List.of("push xde", "push xwa", "push xhl", "call _C9H_divls",
                 "inc 8, xsp", "ld xwa, xhl", "pop xde");
-        return index + division.size() <= code.size()
+        return index >= 0 && index + division.size() <= code.size()
                 && code.subList(index, index + division.size()).equals(division);
     }
 

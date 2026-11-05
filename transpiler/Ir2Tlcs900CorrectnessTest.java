@@ -2080,6 +2080,63 @@ public final class Ir2Tlcs900CorrectnessTest {
         fixtures.add(new Fixture("loop_context_args_alloc_opt", 32, 17, expected));
     }
 
+    private static void followups() throws Exception {
+        AsmOptimizerFollowupTest.main(new String[0]);
+        List<String> frame = AsmOptimizerFollowupTest.frame();
+        byte[] frameMemory = SEED.clone();
+        System.arraycopy(new byte[]{(byte)0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, (byte)0xaa},
+            0, frameMemory, 0, 9);
+        byte[] counterMemory = SEED.clone();
+        System.arraycopy(new byte[]{4, 0, 0, 0}, 0, counterMemory, 0, 4);
+        for (String shape : List.of("frame", "counter", "counter_signed", "counter_wrap", "counter_indirect"))
+                for (int variant = 0; variant < 3; variant++) {
+            List<String> body = shape.equals("frame") ? frame : AsmOptimizerFollowupTest.counter();
+            int counterEnd = 4;
+            if (shape.equals("counter_signed") || shape.equals("counter_wrap")) {
+                int seed = shape.equals("counter_signed") ? 0x7ffffffe : -2;
+                counterEnd = shape.equals("counter_signed") ? 0x80000000 : 0;
+                body = new ArrayList<>(body);
+                body.set(body.indexOf("\tld xiy, 0"), "\tld xiy, " + Ir2Tlcs900.fmtImm(seed));
+                body.set(body.indexOf("\tcp xwa, 4"), "\tcp xwa, " + Ir2Tlcs900.fmtImm(counterEnd));
+            }
+            if (shape.equals("counter_indirect")) {
+                body = new ArrayList<>(body);
+                int reload = body.indexOf("\tld xiy, (xsp+20)");
+                body.set(reload, "\tld xwa, (xsp+20)");
+                body.add(reload + 1, "\tld xiy, xwa");
+            }
+            if (variant > 0) body = shape.equals("frame") ? AsmOptimizer.compactAllocatedFrames(body)
+                : AsmOptimizer.forwardAllocatedCounters(body);
+            if (variant > 1) body = AsmOptimizer.runPasses(body, false);
+            String preamble = "\tcpu 93C141\n\tmaxmode on\n\torg 0200000h\n";
+            if (shape.equals("frame")) preamble += "\tld xwa, 011223344h\n\tld (xsp+4), xwa\n";
+            String name = "followup_" + shape + "_alloc_" + variant;
+            Files.writeString(output.resolve(name + ".asm"), preamble + String.join("\n", body) + "\n");
+            byte[] expected = shape.equals("frame") ? frameMemory : counterMemory.clone();
+            if (!shape.equals("frame")) for (int b = 0; b < 4; b++) expected[b] = (byte)(counterEnd >>> (8 * b));
+            fixtures.add(new Fixture(name, 32, 17, expected));
+        }
+        for (String condition : List.of("Z", "NZ", "C", "NC"))
+            for (String branch : List.of("Z", "NZ")) for (int value : new int[]{2, 3, 4}) {
+                boolean truth = switch (condition) {
+                    case "Z" -> value == 3; case "NZ" -> value != 3;
+                    case "C" -> value < 3; default -> value >= 3;
+                };
+                int expected = 0xdead0000 | ((branch.equals("NZ") == truth) ? 0x5678 : 0x1234);
+                List<String> raw = AsmOptimizerFollowupTest.bool(value, condition, branch);
+                for (int variant = 0; variant < 4; variant++) {
+                    List<String> input = new ArrayList<>(raw);
+                    if (variant >= 2) input.add(input.indexOf("\tcp wa, 0"), "\tinc 1, xbc");
+                    List<String> body = variant % 2 == 0 ? input : Ir2Tlcs900.simplifyBoolBranchPatterns(input);
+                    if (variant % 2 != 0) require(body.size() == input.size() - 3, "narrow successor must fuse");
+                    String name = "followup_bool_" + condition + "_" + branch + "_" + value + "_" + variant;
+                    Files.writeString(output.resolve(name + ".asm"), "\tcpu 93C141\n\tmaxmode on\n\torg 0200000h\n"
+                        + String.join("\n", body) + "\n\tend\n");
+                    fixtures.add(new Fixture(name, 32, expected, null));
+                }
+            }
+    }
+
     public static void main(String[] args) throws Exception {
         String[] packs = {"Classic Levels", "Classic II Levels", "Children's Pack",
                 "Confusion Pack", "Impossible Pack", "Panic Pack", "Twister Levels",
@@ -2119,6 +2176,8 @@ public final class Ir2Tlcs900CorrectnessTest {
             loopAllocation();
         } else if (args.length > 0 && args[0].equals("--loop-optimizations-only")) {
             loopOptimizations();
+        } else if (args.length > 0 && args[0].equals("--followups-only")) {
+            followups();
         } else if (args.length > 0 && args[0].equals("--counter-only")) {
             counterComparisons();
         } else if (args.length > 0 && args[0].equals("--branches-only")) {
@@ -2128,6 +2187,7 @@ public final class Ir2Tlcs900CorrectnessTest {
         } else if (args.length > 0 && args[0].equals("--store-select-only")) {
             storeSelectCleanup();
         } else {
+            followups();
             directLoadCopies();
             aluFolds();
             localArrays();

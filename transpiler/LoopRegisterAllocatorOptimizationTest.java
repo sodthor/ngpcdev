@@ -162,7 +162,11 @@ public final class LoopRegisterAllocatorOptimizationTest {
             List<String> input = outer(operation);
             require(AsmOptimizer.removeUnusedAllocatedBankSaves(input).equals(input), "outer barrier " + operation);
         }
-        List<String> helper = outer("\tcall _C9H_divls");
+        List<String> helper = outer("\tpush xde");
+        helper.add(helper.indexOf("\tpush xde"), "\tcp xbc, 0");
+        int callAt = helper.indexOf("\tpush xde") + 1;
+        helper.addAll(callAt, List.of("\tpush xwa", "\tpush xhl", "\tcall _C9H_divls",
+            "\tinc 8, xsp", "\tld xwa, xhl", "\tpop xde"));
         helper.add(helper.size() - 1, "_C9H_divls:");
         helper.add(helper.size() - 1, "\tret");
         require(!AsmOptimizer.removeUnusedAllocatedBankSaves(helper).contains("\tpush xhl2"), "verified bank-neutral helper");
