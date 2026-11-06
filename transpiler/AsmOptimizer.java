@@ -115,7 +115,13 @@ public class AsmOptimizer {
             new Pass("eliminateOverwrittenSpills[2]", AsmOptimizer::eliminateOverwrittenSpills),
             new Pass("foldShiftedWordSubtract", AsmOptimizer::foldShiftedWordSubtract),
             new Pass("fuseZeroExtendedByteLoads", AsmOptimizer::fuseZeroExtendedByteLoads),
-            new Pass("foldDirectLoadCopies", AsmOptimizer::foldDirectLoadCopies, true)
+            new Pass("foldDirectLoadCopies", AsmOptimizer::foldDirectLoadCopies, true),
+            new Pass("foldSavedByteAddress", AsmOptimizer::foldSavedByteAddress, true),
+            new Pass("removeUnusedIndexSaves", AsmOptimizer::removeUnusedIndexSaves, true),
+            new Pass("promoteAllocatedFrameSlots", AsmOptimizer::promoteAllocatedFrameSlots, true),
+            new Pass("compactAllocatedFrames[post-promotion]", AsmOptimizer::compactAllocatedFrames, true),
+            new Pass("foldComputedRegisterCopies", AsmOptimizer::foldComputedRegisterCopies, true),
+            new Pass("layoutPhiCopyBranches", AsmOptimizer::layoutPhiCopyBranches, true)
         );
 
         for (Pass p : passes) {
@@ -218,6 +224,184 @@ public class AsmOptimizer {
             }
         }
         return out;
+    }
+
+    /** Drop allocator-context saves of registers dead after the context in the
+     * enclosing function, shifting the context's enclosing-frame accesses.
+     * RET reads every register (except XWA/XHL of void functions); RETI, unknown
+     * instructions, calls and jumps read everything.
+     */
+    static List<String> trimAllocatedLoopSaves(List<String> lines, Set<String> voidFunctions) {
+        List<String> out = new ArrayList<>(lines);
+        List<String> module = lines.stream().map(l -> l.split(";", 2)[0].strip()).filter(l -> !l.isEmpty()).toList();
+        boolean division = divisionPreservesBank(module) && divisionUsesPrivateStack(module);
+        Pattern frameAdd = Pattern.compile("\\tadd xsp, -(\\d+)\\t; experimental loop frame");
+        Pattern slot = Pattern.compile("\\(xsp\\+(\\d+)\\)");
+        for (ProtectedFunction function : protectedFunctions(out)) {
+            for (int frame = function.start + 1; frame < function.end; frame++) {
+                String frameLine = out.get(frame);
+                int bytes;
+                Matcher sized = frameAdd.matcher(frameLine);
+                if (sized.matches()) bytes = Integer.parseInt(sized.group(1));
+                else if (frameLine.equals("\t; experimental loop frame: 0 bytes")) bytes = 0;
+                else continue;
+                int first = frame;
+                while (out.get(first - 1).matches("\\tpush \\w+")) first--;
+                List<String> saved = new ArrayList<>();
+                for (int i = first; i < frame; i++) saved.add(out.get(i).substring(6));
+                int end = frame + 1;
+                while (end < function.end && !out.get(end).equals(LoopRegisterAllocator.CONTEXT_END)) end++;
+                int pops = end - saved.size();
+                if (saved.isEmpty() || end >= function.end || pops <= frame) continue;
+                boolean mirrored = saved.stream().allMatch(r -> contextRegisterBytes(r) == 4);
+                for (int i = 0; i < saved.size() && mirrored; i++)
+                    mirrored = out.get(pops + i).equals("\tpop " + saved.get(saved.size() - 1 - i));
+                int bodyEnd = bytes == 0 ? pops : pops - 1;
+                if (!mirrored || bytes != 0 && !out.get(bodyEnd).equals("\tadd xsp, " + bytes)) continue;
+                int saveBytes = 4 * saved.size();
+                boolean simple = true;
+                for (int i = frame + 1; i < bodyEnd && simple; i++) {
+                    String code = out.get(i).split(";", 2)[0].strip().toLowerCase(Locale.ROOT);
+                    if (code.isEmpty() || code.endsWith(":")) continue;
+                    if (code.matches("(?:push|pop|call) .*|ret|reti")
+                            || slot.matcher(code).replaceAll("").matches(".*\\b(?:xsp|sp|qsp)\\b.*")) simple = false;
+                    Matcher refs = slot.matcher(code);
+                    while (refs.find()) {
+                        int offset = Integer.parseInt(refs.group(1));
+                        if (offset >= bytes && offset < bytes + saveBytes) simple = false;
+                    }
+                }
+                if (!simple) continue;
+                List<String> code = new ArrayList<>();
+                Map<Integer, Integer> index = new HashMap<>();
+                for (int i = function.start + 1; i < function.end; i++) {
+                    String core = out.get(i).split(";", 2)[0].strip();
+                    if (core.isEmpty()) continue;
+                    index.put(i, code.size());
+                    code.add(core);
+                }
+                Set<Integer> transparent = new HashSet<>();
+                for (int i = first; i < frame; i++) transparent.add(index.get(i));
+                for (int i = pops; i < end; i++) transparent.add(index.get(i));
+                int after = code.size();
+                for (int i = end + 1; i < function.end; i++)
+                    if (index.containsKey(i)) { after = index.get(i); break; }
+                boolean isVoid = voidFunctions.contains(function.name());
+                List<String> removable = new ArrayList<>();
+                for (String reg : saved)
+                    if (!registerLiveAt(code, after, reg, transparent, division, isVoid)) removable.add(reg);
+                if (removable.isEmpty()) continue;
+                int shrink = 4 * removable.size();
+                for (int i = frame + 1; i < bodyEnd; i++) {
+                    Matcher refs = slot.matcher(out.get(i));
+                    StringBuilder patched = new StringBuilder();
+                    while (refs.find()) {
+                        int offset = Integer.parseInt(refs.group(1));
+                        refs.appendReplacement(patched, "(xsp+" + (offset >= bytes + saveBytes ? offset - shrink : offset) + ")");
+                    }
+                    refs.appendTail(patched);
+                    out.set(i, patched.toString());
+                }
+                for (int i = end - 1; i >= first; i--) {
+                    String line = out.get(i);
+                    if ((i < frame || i >= pops) && removable.contains(line.substring(line.indexOf(' ') + 1)))
+                        out.remove(i);
+                }
+                return trimAllocatedLoopSaves(out, voidFunctions);
+            }
+        }
+        return out;
+    }
+
+    private static Map<String, Integer> registerLanes(String reg) {
+        Map<String, Integer> lanes = new HashMap<>();
+        lanes.put(reg, -1);
+        Matcher bank = Pattern.compile("x(wa|bc|de|hl)([12])").matcher(reg);
+        if (bank.matches()) {
+            String pair = bank.group(1), n = bank.group(2);
+            lanes.put("r" + pair + n, 0xffff);
+            lanes.put("q" + pair + n, 0xffff0000);
+            lanes.put("r" + pair.charAt(0) + n, 0xff00);
+            lanes.put("r" + pair.charAt(1) + n, 0xff);
+            lanes.put("q" + pair.charAt(0) + n, 0xff000000);
+            lanes.put("q" + pair.charAt(1) + n, 0xff0000);
+            return lanes;
+        }
+        String low = reg.substring(1);
+        lanes.put(low, 0xffff);
+        lanes.put("q" + low, 0xffff0000);
+        if (low.startsWith("i")) {
+            lanes.put(low + "l", 0xff); lanes.put(low + "h", 0xff00);
+            lanes.put("q" + low + "l", 0xff0000); lanes.put("q" + low + "h", 0xff000000);
+        } else {
+            lanes.put(low.substring(0, 1), 0xff00); lanes.put(low.substring(1), 0xff);
+            lanes.put("q" + low.charAt(0), 0xff000000); lanes.put("q" + low.charAt(1), 0xff0000);
+        }
+        return lanes;
+    }
+
+    /** Backward lane liveness of one register over comment-free function code. */
+    static boolean registerLiveAt(List<String> code, int at, String reg, Set<Integer> transparent,
+                                  boolean division, boolean isVoid) {
+        Map<String, Integer> lanes = registerLanes(reg);
+        Pattern tokens = Pattern.compile("(?<![\\w.$])(?:" + String.join("|", lanes.keySet()) + ")(?![\\w.$])");
+        Pattern jump = Pattern.compile("(?:jr|jrl|jp) (?:(\\w+),\\s*)?([.\\w$]+)");
+        Pattern known = Pattern.compile("(?:ld|lda|add|sub|adc|sbc|and|or|xor|cp|inc|dec|sla|sra|srl|sll|rl|rr|rlc|rrc"
+            + "|extz|exts|bit|set|res|neg|cpl|divs|div|muls|mul|scc|push|pop) .+|nop|ei|di|ei .+");
+        Map<String, Integer> labels = new HashMap<>();
+        for (int i = 0; i < code.size(); i++)
+            if (code.get(i).endsWith(":")) labels.put(code.get(i).substring(0, code.get(i).length() - 1), i);
+        Set<Integer> opaque = new HashSet<>(transparent);
+        if (reg.equals("xde"))
+            for (int i = 0; i < code.size(); i++)
+                if (division && divisionFallbackAt(code, i)) { opaque.add(i); opaque.add(i + 6); }
+        int n = code.size();
+        int[] read = new int[n], kill = new int[n];
+        List<int[]> successors = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            String line = code.get(i);
+            int[] next = {i + 1};
+            Matcher branch = jump.matcher(line);
+            if (opaque.contains(i) || line.endsWith(":")) {
+                // no effect
+            } else if (branch.matches()) {
+                Integer target = labels.get(branch.group(2));
+                if (target == null) { read[i] = -1; next = branch.group(1) == null ? new int[0] : next; }
+                else next = branch.group(1) == null ? new int[] {target} : new int[] {target, i + 1};
+            } else if (line.equals("ret") || line.equals("reti")) {
+                next = new int[0];
+                read[i] = -1;
+                if (isVoid && line.equals("ret") && Set.of("xwa", "xhl").contains(reg)) read[i] = 0;
+            } else if (line.startsWith("call ")) {
+                if (!(division && divisionFallbackAt(code, i - 3))) read[i] = -1;
+            } else if (!known.matcher(line).matches()) {
+                read[i] = -1;
+            } else {
+                String operands = line.substring(line.indexOf(' ') + 1);
+                Matcher write = Pattern.compile("(?:ld|lda) ([^,(]+), (.+)|pop (\\w+)").matcher(line);
+                if (write.matches()) {
+                    String destination = (write.group(1) != null ? write.group(1) : write.group(3)).strip();
+                    kill[i] = lanes.getOrDefault(destination, 0);
+                    operands = write.group(2) == null ? "" : write.group(2);
+                }
+                Matcher mentioned = tokens.matcher(operands);
+                while (mentioned.find()) read[i] |= lanes.get(mentioned.group());
+            }
+            successors.add(next);
+        }
+        int[] live = new int[n + 1];
+        live[n] = -1;
+        boolean changed;
+        do {
+            changed = false;
+            for (int i = n - 1; i >= 0; i--) {
+                int out = 0;
+                for (int s : successors.get(i)) out |= live[Math.min(s, n)];
+                int value = read[i] | (out & ~kill[i]);
+                if (value != live[i]) { live[i] = value; changed = true; }
+            }
+        } while (changed);
+        return live[Math.min(at, n)] != 0;
     }
 
     private static Map<Integer, Integer> contextDepths(List<String> code, int first, int end, List<String> module) {
@@ -384,6 +568,128 @@ public class AsmOptimizer {
         return out;
     }
 
+    // Promote complete, nonescaping outer-frame cells into banks unused by the
+    // entire function (including nested allocator contexts). Keep frame layout
+    // unchanged; new callee saves do not shift locals below the outer frame.
+    static List<String> promoteAllocatedFrameSlots(List<String> lines) {
+        List<String> out = new ArrayList<>(lines);
+        List<String> module = lines.stream().map(l -> l.split(";", 2)[0].strip())
+                .filter(l -> !l.isEmpty()).toList();
+        List<ProtectedFunction> functions = protectedFunctions(lines);
+        for (int fi = functions.size() - 1; fi >= 0; fi--) {
+            ProtectedFunction function = functions.get(fi);
+            List<String> code = new ArrayList<>();
+            List<Integer> positions = new ArrayList<>();
+            for (int i = function.start + 1; i < function.end; i++) {
+                String core = out.get(i).split(";", 2)[0].strip();
+                if (!core.isEmpty()) { code.add(core); positions.add(i); }
+            }
+            if (code.size() < 4 || !code.get(code.size() - 1).equals("ret")) continue;
+            int frameLine = 1;
+            List<String> saved = new ArrayList<>();
+            while (frameLine < code.size() && code.get(frameLine).startsWith("push "))
+                saved.add(code.get(frameLine++).substring(5));
+            if (frameLine >= code.size()) continue;
+            Matcher frame = Pattern.compile("add xsp, -(\\d+)").matcher(code.get(frameLine));
+            if (!frame.matches()) continue;
+            int frameBytes = Integer.parseInt(frame.group(1));
+            int end = code.size() - saved.size() - 2;
+            if (end <= frameLine || !code.get(end).equals("add xsp, " + frameBytes)) continue;
+            boolean mirrored = true;
+            for (int i = 0; i < saved.size(); i++) mirrored &= code.get(end + 1 + i)
+                    .equals("pop " + saved.get(saved.size() - 1 - i));
+            if (!mirrored) continue;
+            Map<Integer, Integer> depths = contextDepths(code, frameLine + 1, end, module);
+            if (depths == null) continue;
+            List<String> free = new ArrayList<>();
+            for (String bank : List.of("xwa2", "xbc2", "xhl2", "xde2", "xwa1", "xbc1", "xhl1", "xde1")) {
+                String pair = bank.substring(1, 3), number = bank.substring(3);
+                Pattern mention = Pattern.compile("(?<![\\w.$])(?:" + bank + "|[rq]" + pair + number
+                        + "|[rq][" + pair + "]" + number + ")(?![\\w.$])");
+                if (code.stream().noneMatch(c -> mention.matcher(c).find())) free.add(bank);
+            }
+            if (free.isEmpty()) continue;
+            Pattern slot = Pattern.compile("\\(xsp\\+(\\d+)\\)");
+            Map<Integer, List<Integer>> references = new LinkedHashMap<>();
+            Set<Integer> rejected = new HashSet<>();
+            boolean valid = true;
+            for (int i = frameLine + 1; i < end; i++) {
+                Matcher refs = slot.matcher(code.get(i));
+                while (refs.find()) {
+                    int offset = Integer.parseInt(refs.group(1)) + depths.get(i);
+                    int width = contextMemoryBytes(code.get(i));
+                    if (width == 0 || offset >= frameBytes) { valid = false; break; }
+                    if (offset < 0) {
+                        if (offset + width > 0) valid = false;
+                        continue; // nested context's private cells
+                    }
+                    for (int cell = offset / 4 * 4; cell < offset + width; cell += 4) {
+                        if (width != 4 || offset % 4 != 0 || offset + width > frameBytes
+                                || !code.get(i).matches("(?:ld|add|sub|adc|sbc|and|or|xor|cp) .+")) rejected.add(cell);
+                    }
+                    references.computeIfAbsent(offset, key -> new ArrayList<>()).add(i);
+                }
+                if (!valid) break;
+            }
+            if (!valid) continue;
+            int bodyFirst = frameLine + 1;
+            List<Integer> candidates = new ArrayList<>(references.keySet());
+            candidates.removeIf(cell -> cell % 4 != 0 || cell + 4 > frameBytes
+                    || rejected.contains(cell) || references.get(cell).size() < 4
+                    || !frameSlotDefinedBeforeReads(code, depths, bodyFirst, end, cell));
+            candidates.sort(Comparator.comparingInt((Integer cell) -> references.get(cell).size()).reversed());
+            Map<Integer, String> homes = new LinkedHashMap<>();
+            for (int i = 0; i < Math.min(free.size(), candidates.size()); i++) homes.put(candidates.get(i), free.get(i));
+            if (homes.isEmpty()) continue;
+            for (int i = frameLine + 1; i < end; i++) {
+                String raw = out.get(positions.get(i));
+                Matcher refs = slot.matcher(raw.split(";", 2)[0]);
+                StringBuffer rewritten = new StringBuffer();
+                while (refs.find()) {
+                    String home = homes.get(Integer.parseInt(refs.group(1)) + depths.get(i));
+                    refs.appendReplacement(rewritten, Matcher.quoteReplacement(home == null ? refs.group() : home));
+                }
+                refs.appendTail(rewritten);
+                int comment = raw.indexOf(';');
+                out.set(positions.get(i), rewritten + (comment < 0 ? "" : raw.substring(comment)));
+            }
+            List<String> banks = new ArrayList<>(homes.values());
+            for (String bank : banks) out.add(positions.get(end) + 1, "\tpop " + bank);
+            List<String> pushes = banks.stream().map(bank -> "\tpush " + bank).toList();
+            out.addAll(positions.get(frameLine), pushes);
+        }
+        return out;
+    }
+
+    private static boolean frameSlotDefinedBeforeReads(List<String> code, Map<Integer, Integer> depths,
+                                                       int first, int end, int cell) {
+        Map<String, Integer> labels = new HashMap<>();
+        for (int i = first; i < end; i++) if (code.get(i).endsWith(":"))
+            labels.put(code.get(i).substring(0, code.get(i).length() - 1), i);
+        record State(int line, boolean defined) {}
+        ArrayDeque<State> work = new ArrayDeque<>();
+        Set<State> visited = new HashSet<>();
+        work.add(new State(first, false));
+        while (!work.isEmpty()) {
+            State state = work.removeFirst();
+            if (state.line == end || !visited.add(state)) continue;
+            int i = state.line;
+            boolean defined = state.defined;
+            String reference = "(xsp+" + (cell - depths.get(i)) + ")";
+            if (code.get(i).contains(reference)) {
+                if (code.get(i).startsWith("ld " + reference + ", ")) defined = true;
+                else if (!defined) return false;
+            }
+            Matcher jump = Pattern.compile("(?:jr|jrl) (?:(\\w+),\\s*)?(\\.[\\w.$]+)").matcher(code.get(i));
+            if (jump.matches()) {
+                work.add(new State(labels.get(jump.group(2)), defined));
+                if (jump.group(1) == null) continue;
+            }
+            work.add(new State(i + 1, defined));
+        }
+        return true;
+    }
+
     private static int contextRegisterBytes(String reg) {
         if (reg.matches("x(?:wa|bc|de|hl)[12]?|x(?:ix|iy|iz)")) return 4;
         if (reg.matches("(?:wa|bc|de|hl|ix|iy|iz)|[rq](?:wa|bc|de|hl)[12]")) return 2;
@@ -436,15 +742,17 @@ public class AsmOptimizer {
                     if (width == 0) return false;
                     delta += push.group(1).equals("push") ? -width : width;
                 }
-                Matcher adjust = Pattern.compile("add xsp, (-?\\d+)").matcher(instruction);
+                Matcher adjust = Pattern.compile("add xsp, (-?\\d+)|(?:inc|dec) (\\d+), xsp").matcher(instruction);
                 if (adjust.matches()) {
-                    if (!stackFlagsDeadAfter(module.subList(first, end), i - first)) return false;
-                    delta += Integer.parseInt(adjust.group(1));
+                    if (adjust.group(1) != null
+                            && !stackFlagsDeadAfter(module.subList(first, end), i - first)) return false;
+                    delta += adjust.group(1) != null ? Integer.parseInt(adjust.group(1))
+                            : Integer.parseInt(adjust.group(2)) * (instruction.startsWith("dec ") ? -1 : 1);
                 }
                 if (instruction.startsWith("call ") && !(instruction.equals("call _C9H_divlu")
                         && i >= first + 3 && module.get(i - 2).equals("push xwa")
                         && module.get(i - 1).equals("push xbc")
-                        && i + 1 < end && module.get(i + 1).equals("add xsp, 8"))) return false;
+                        && i + 1 < end && Set.of("add xsp, 8", "inc 8, xsp").contains(module.get(i + 1)))) return false;
                 Matcher branch = Pattern.compile("(?:jr|jrl) (?:(\\w+),\\s*)?(\\.[\\w.$]+)").matcher(instruction);
                 if (branch.matches()) {
                     Integer target = labels.get(branch.group(2));
@@ -1714,6 +2022,92 @@ public class AsmOptimizer {
         };
     }
 
+    // Retarget a straight-line, equal-width computation to its final ordinary
+    // register. No memory ALU operands, entry points, calls or partial writes.
+    // Arithmetic and flags are unchanged; the temporary must be dead on every
+    // successor, and no operand may depend on the old destination value.
+    static List<String> foldComputedRegisterCopies(List<String> lines) {
+        List<String> out = foldRegisterCounterCopies(lines);
+        Pattern load = Pattern.compile("ld (\\w+), (.+)");
+        Pattern alu = Pattern.compile("(add|sub|and|or|xor) (\\w+), (.+)");
+        Pattern shift = Pattern.compile("(sla|sra|srl|sll) (\\d+), (\\w+)");
+        for (int i = 0; i < out.size(); i++) {
+            Matcher first = load.matcher(out.get(i).split(";", 2)[0].strip());
+            if (!first.matches()) continue;
+            String temp = first.group(1), source = first.group(2);
+            int width = directLoadRegisterWidth(temp);
+            if (width != 32 || !directLoadSource(source, width)) continue;
+            int j = i + 1;
+            for (; j < out.size() && j <= i + 8; j++) {
+                String core = out.get(j).split(";", 2)[0].strip();
+                Matcher a = alu.matcher(core), s = shift.matcher(core);
+                if (a.matches() && a.group(2).equals(temp)
+                        && (parseAsmImmediate(a.group(3)).isPresent()
+                            || directLoadRegisterWidth(a.group(3)) == width)
+                        && !registerAliases(temp).contains(a.group(3))) continue;
+                if (s.matches() && s.group(3).equals(temp)) continue;
+                break;
+            }
+            if (j == i + 1 || j >= out.size()) continue;
+            Matcher last = load.matcher(out.get(j).split(";", 2)[0].strip());
+            if (!last.matches() || !last.group(2).equals(temp)) continue;
+            String dest = last.group(1);
+            if (directLoadRegisterWidth(dest) != width || dest.equals(temp)
+                    || !loadTemporaryDeadAfter(out, j, temp)) continue;
+            Pattern destinationUse = Pattern.compile("(?<![\\w.$])(?:"
+                    + String.join("|", registerAliases(dest)) + ")(?![\\w.$])");
+            boolean safe = true;
+            for (int k = i + 1; k < j; k++)
+                if (destinationUse.matcher(out.get(k).split(";", 2)[0]).find()) safe = false;
+            if (!safe) continue;
+            Pattern temporaryUse = Pattern.compile("(?<![\\w.$])" + temp + "(?![\\w.$])");
+            for (int k = i; k < j; k++) {
+                String raw = out.get(k);
+                int comment = raw.indexOf(';');
+                // Only the destination of the first load is changed: its
+                // source/address is evaluated using the original registers.
+                String core = k == i ? "\tld " + dest + ", " + source
+                        : temporaryUse.matcher(raw.split(";", 2)[0]).replaceAll(dest);
+                out.set(k, core + (comment < 0 ? "" : raw.substring(comment)));
+            }
+            String tail = out.get(j);
+            int comment = tail.indexOf(';');
+            if (comment < 0) out.remove(j);
+            else out.set(j, "\t" + tail.substring(comment));
+        }
+        return out;
+    }
+
+    // Keep the final reload: callers may still use the temporary (e.g. cp wa).
+    // Equal-width counter registers end with the same values even if RFP makes
+    // the ordinary and absolute-bank names aliases. INC/DEC flags are unchanged.
+    static List<String> foldRegisterCounterCopies(List<String> lines) {
+        List<String> out = new ArrayList<>(lines);
+        Pattern first = Pattern.compile("ld (wa|bc|de|hl), ([rq](?:wa|bc|de|hl)[0-3])");
+        for (int i = 0; i + 2 < out.size(); i++) {
+            String a = out.get(i).split(";", 2)[0].strip();
+            Matcher m = first.matcher(a);
+            if (!m.matches()) continue;
+            String temp = m.group(1), home = m.group(2);
+            Matcher op = Pattern.compile("(inc|dec) ([1-8]), " + temp)
+                    .matcher(out.get(i + 1).split(";", 2)[0].strip());
+            if (!op.matches() || !out.get(i + 2).split(";", 2)[0].strip()
+                    .equals("ld " + home + ", " + temp)) continue;
+            String[] cores = {"\t" + op.group(1) + " " + op.group(2) + ", " + home,
+                    "\tld " + temp + ", " + home};
+            List<String> comments = new ArrayList<>();
+            for (int k = i; k <= i + 2; k++) {
+                int c = out.get(k).indexOf(';');
+                if (c >= 0) comments.add("\t" + out.get(k).substring(c));
+            }
+            out.set(i, cores[0]);
+            out.set(i + 1, cores[1]);
+            out.remove(i + 2);
+            out.addAll(i + 2, comments);
+        }
+        return out;
+    }
+
     private static boolean directLoadSource(String source, int width) {
         String lower = source.toLowerCase(Locale.ROOT);
         if (directLoadRegisterWidth(lower) == width || parseAsmImmediate(source).isPresent()) return true;
@@ -1734,6 +2128,10 @@ public class AsmOptimizer {
     }
 
     private static boolean loadTemporaryDeadAfter(List<String> lines, int copy, String temporary) {
+        return loadTemporaryDeadAfter(lines, copy, temporary, -1);
+    }
+
+    private static boolean loadTemporaryDeadAfter(List<String> lines, int copy, String temporary, int affectedBytes) {
         // Only the bytes written by the removed load need to be dead. Reads of
         // a wider alias still observe any pending bytes; partial overwrites do
         // not kill the untouched bytes.
@@ -1775,7 +2173,7 @@ public class AsmOptimizer {
         record Pending(int line, int bytes) {}
         ArrayDeque<Pending> work = new ArrayDeque<>();
         Set<Pending> visited = new HashSet<>();
-        work.add(new Pending(copy + 1, masks.get(temporary)));
+        work.add(new Pending(copy + 1, masks.get(temporary) & affectedBytes));
         while (!work.isEmpty()) {
             Pending state = work.removeFirst();
             if (!visited.add(state)) continue;
@@ -2102,17 +2500,175 @@ public class AsmOptimizer {
     //     in the block are NOT affected — those stores remain in place.)
     // =========================================================================
     static List<String> fuseZeroExtendedByteLoads(List<String> lines) {
+        Pattern byteLoad = Pattern.compile("^(\\s*)ld\\s+a,\\s*(\\(.*\\))\\s*(;.*)?$",
+                Pattern.CASE_INSENSITIVE);
+        Pattern accumulatorAddress = Pattern.compile(
+                "(?i)(?<![\\w.$])(?:xwa[0-3]?|wa|w|a|[rq](?:wa|w|a)[0-9]*)(?![\\w.$])");
         List<String> out = new ArrayList<>(lines);
         for (int i = 0; i + 2 < out.size(); i++) {
-            String load = out.get(i).split(";", 2)[0].strip();
-            if (!load.matches("ld a, \\(x(?:hl|bc|de|ix|iy|iz)(?:\\+[0-9]+)?\\)")
-                    || !out.get(i + 1).strip().equals("extz wa")
-                    || !out.get(i + 2).strip().equals("extz xwa")) continue;
-            out.set(i, "\tld xwa, 0");
-            out.set(i + 1, "\t" + load);
-            out.remove(i + 2);
+            Matcher load = byteLoad.matcher(out.get(i));
+            if (!load.matches() || !directLoadSource(load.group(2), 8)
+                    || accumulatorAddress.matcher(load.group(2)).find()) continue;
+            int word = i + 1;
+            while (word < out.size() && out.get(word).split(";", 2)[0].isBlank()) word++;
+            int wide = word + 1;
+            while (wide < out.size() && out.get(wide).split(";", 2)[0].isBlank()) wide++;
+            if (wide >= out.size()
+                    || !out.get(word).split(";", 2)[0].strip().matches("(?i)extz\\s+wa")
+                    || !out.get(wide).split(";", 2)[0].strip().matches("(?i)extz\\s+xwa")) continue;
+            // Clearing first is flag-neutral and leaves the effective address
+            // unchanged. Keep the byte load and all comments verbatim.
+            for (int index : new int[]{wide, word}) {
+                int comment = out.get(index).indexOf(';');
+                if (comment < 0) out.remove(index);
+                else out.set(index, load.group(1) + out.get(index).substring(comment));
+            }
+            out.add(i, load.group(1) + "ld xwa, 0");
+            i++;
         }
         return out;
+    }
+
+    // Preserve the byte in WA while computing an address without routing the
+    // index through XWA. Only numeric bases and disjoint ordinary registers.
+    static List<String> foldSavedByteAddress(List<String> lines) {
+        List<String> out = new ArrayList<>(lines);
+        Pattern save = Pattern.compile("ld (ix|iy|iz), wa");
+        Pattern index = Pattern.compile("ld xwa, (xbc|xde)");
+        Pattern base = Pattern.compile("ld xhl, (\\S+)");
+        Pattern label = Pattern.compile("^[.\\w].*:.*$");
+        for (int i = 0; i + 5 < out.size(); i++) {
+            List<String> core = new ArrayList<>();
+            for (int j = 0; j < 6; j++) core.add(out.get(i + j).split(";", 2)[0].strip().toLowerCase(Locale.ROOT));
+            Matcher saved = save.matcher(core.get(0)), indexed = index.matcher(core.get(1)),
+                    based = base.matcher(core.get(2));
+            if (!saved.matches() || !indexed.matches() || !based.matches()
+                    || parseAsmImmediate(based.group(1)).isEmpty()
+                    || !core.get(3).equals("add xhl, xwa")
+                    || !core.get(4).equals("ld wa, " + saved.group(1))
+                    || !core.get(5).matches("and wa, (?:0ffh|255|0x0*ff)")
+                    || !loadTemporaryDeadAfter(out, i + 5, "xwa", 0xffff0000)
+                    || !savedByteAddressFlagsDead(out, i + 5, label)) continue;
+            boolean savedDead = loadTemporaryDeadAfter(out, i + 5, saved.group(1));
+            // Keep comments at their original positions; no label or intervening
+            // instruction is accepted by the six-line matcher.
+            String[] replacement = savedDead
+                    ? new String[]{core.get(5), "ld xhl, " + based.group(1),
+                        "add xhl, " + indexed.group(1), null, null, null}
+                    : new String[]{core.get(0), core.get(5), "ld xhl, " + based.group(1),
+                        "add xhl, " + indexed.group(1), null, null};
+            List<String> rewritten = new ArrayList<>();
+            for (int j = 0; j < 6; j++) {
+                String raw = out.get(i + j);
+                String indent = raw.substring(0, raw.length() - raw.stripLeading().length());
+                int comment = raw.indexOf(';');
+                if (replacement[j] != null) rewritten.add(indent + replacement[j]
+                        + (comment < 0 ? "" : " " + raw.substring(comment)));
+                else if (comment >= 0) rewritten.add(indent + raw.substring(comment));
+            }
+            out.subList(i, i + 6).clear();
+            out.addAll(i, rewritten);
+        }
+        return out;
+    }
+
+    // Function-local index cleanup. Stack-relative functions need offset
+    // relocation and are deliberately excluded. Unknown callees/traps remain
+    // barriers; only the NGPC INTLVSET syscall's explicit bank-3 ABI is known.
+    static List<String> removeUnusedIndexSaves(List<String> lines) {
+        List<String> out = new ArrayList<>(lines);
+        Set<Integer> drop = new HashSet<>();
+        Pattern function = Pattern.compile("_[\\w.$]+:");
+        for (int start = 0; start < out.size(); start++) {
+            if (!function.matcher(out.get(start).split(";", 2)[0].strip()).matches()) continue;
+            int end = start + 1;
+            while (end < out.size() && !function.matcher(out.get(end).split(";", 2)[0].strip()).matches()
+                    && !out.get(end).startsWith(PROTECTED_END)) end++;
+            List<Integer> positions = new ArrayList<>();
+            List<String> code = new ArrayList<>();
+            for (int i = start + 1; i < end; i++) {
+                String core = out.get(i).split(";", 2)[0].strip().toLowerCase(Locale.ROOT);
+                if (!core.isEmpty()) { positions.add(i); code.add(core); }
+            }
+            if (code.isEmpty() || !code.get(code.size() - 1).equals("ret")) continue;
+            int prologue = 0;
+            while (prologue < code.size() && code.get(prologue).matches("push \\w+")) prologue++;
+            int epilogue = code.size() - 2;
+            while (epilogue >= prologue && code.get(epilogue).matches("pop \\w+")) epilogue--;
+            if (code.size() - 2 - epilogue != prologue) continue;
+            boolean balanced = true;
+            for (int i = 0; i < prologue; i++)
+                balanced &= code.get(code.size() - 2 - i).equals("pop " + code.get(i).substring(5));
+            if (!balanced) continue;
+            Set<String> localTargets = new HashSet<>();
+            for (String core : code)
+                if (core.matches("\\.[\\w.$]+:")) localTargets.add(core.substring(0, core.length() - 1));
+            for (int saved = 0; saved < prologue; saved++) {
+                String register = code.get(saved).substring(5);
+                if (!register.matches("x?i[xyz]")) continue;
+                String narrow = register.replaceFirst("^x", "");
+                Pattern alias = Pattern.compile("(?<![\\w.$])(?:x?" + narrow + ")(?![\\w.$])");
+                List<Integer> writes = new ArrayList<>();
+                boolean safe = true;
+                for (int i = prologue; i <= epilogue && safe; i++) {
+                    String core = code.get(i);
+                    if (core.matches("\\.[\\w.$]+:") || core.isEmpty()) continue;
+                    if (core.matches(".*\\b(?:xsp|sp|sr|rfp|f|[rq]i[xyz][0-9]*)\\b.*")) { safe = false; break; }
+                    if (core.equals("swi 1")) {
+                        // SYSTEM.INC: INTLVSET takes RW3=4, RB3=level,
+                        // RC3=source. The dispatcher preserves XIX; the service
+                        // uses bank-3 GP registers, not IX/IY/IZ.
+                        safe = i >= 3 && code.get(i - 3).matches("ldb? rw3,\\s*(?:4|04h)")
+                                && code.get(i - 2).matches("ldb? rb3,\\s*[0-5]")
+                                && code.get(i - 1).matches("ldb? rc3,\\s*[0-9]");
+                        continue;
+                    }
+                    if (!core.matches("(?:ld|ldb|ldw|lda|add|sub|and|or|xor|cp|inc|dec|extz|exts|sla|srl|sra|bit|scc|jr|jrl)\\s+.*|di|ei|nop")) {
+                        safe = false; break;
+                    }
+                    if (core.matches("(?:jr|jrl)\\s+.*")
+                            && !core.matches("(?:jr|jrl)\\s+(?:[a-z]+,\\s*)?\\.[\\w.$]+")) { safe = false; break; }
+                    if (core.matches("(?:jr|jrl)\\s+.*")) {
+                        String target = core.substring(core.lastIndexOf(' ') + 1);
+                        if (!localTargets.contains(target)) { safe = false; break; }
+                    }
+                    if (!alias.matcher(core).find()) continue;
+                    Matcher write = Pattern.compile("ld (x?" + narrow + "),\\s*(\\w+|-?\\d+)").matcher(core);
+                    if (!write.matches() || register.equals(narrow) && !write.group(1).equals(narrow)
+                            || alias.matcher(write.group(2)).find()
+                            || !(directLoadRegisterWidth(write.group(2)) == directLoadRegisterWidth(write.group(1))
+                                || parseAsmImmediate(write.group(2)).isPresent())) { safe = false; break; }
+                    writes.add(positions.get(i));
+                }
+                if (safe) {
+                    drop.add(positions.get(saved));
+                    drop.add(positions.get(code.size() - 2 - saved));
+                    drop.addAll(writes);
+                }
+            }
+        }
+        for (int i = out.size() - 1; i >= 0; i--) {
+            if (!drop.contains(i)) continue;
+            int comment = out.get(i).indexOf(';');
+            if (comment < 0) out.remove(i);
+            else out.set(i, "\t" + out.get(i).substring(comment));
+        }
+        return out;
+    }
+
+    private static boolean savedByteAddressFlagsDead(List<String> lines, int start, Pattern label) {
+        for (int i = start + 1; i < lines.size(); i++) {
+            String core = lines.get(i).split(";", 2)[0].strip().toLowerCase(Locale.ROOT);
+            if (core.isEmpty()) continue;
+            if (label.matcher(core).matches() || core.matches(".*\\b(?:sr|f|rfp)\\b.*")
+                    || asmConsumesFlags(core)) return false;
+            if (asmClobbersFlags(core)) return true;
+            // TLCS-900 register INC/DEC preserve flags, unlike ADD/SUB.
+            if (asmNeutralForFlags(core)
+                    || core.matches("(?:inc|dec)\\s+[1-8],\\s*(?:x(?:wa|bc|de|hl|ix|iy|iz)|wa|bc|de|hl|ix|iy|iz)")) continue;
+            return false;
+        }
+        return false;
     }
 
     static List<String> foldShiftedWordSubtract(List<String> lines) {
@@ -4492,6 +5048,66 @@ public class AsmOptimizer {
     // Eliminates one taken-branch penalty and one instruction.  The NCC map
     // covers the standard TLCS-900 condition codes.
     // =========================================================================
+    static List<String> layoutPhiCopyBranches(List<String> lines) {
+        List<String> out = new ArrayList<>(lines);
+        Pattern conditional = Pattern.compile("(jr|jrl) (Z|NZ|z|nz), (\\.Lbb_\\w+_phi_edge_\\d+)");
+        Pattern jump = Pattern.compile("(?:jr|jrl) (\\.Lbb_\\w+)");
+        for (int i = 0; i < out.size(); i++) {
+            Matcher cond = conditional.matcher(out.get(i).split(";", 2)[0].strip());
+            if (!cond.matches()) continue;
+            String edge = cond.group(3);
+            Pattern mention = Pattern.compile("(?<![\\w.$])" + Pattern.quote(edge) + "(?![\\w.$])");
+            long references = out.stream().map(l -> l.split(";", 2)[0])
+                    .filter(l -> mention.matcher(l).find()).count();
+            if (references != 2) continue; // exactly this branch and one definition
+            int aEnd = phiCopyBlockEnd(out, i + 1);
+            if (aEnd < 0) continue;
+            Matcher exitJump = jump.matcher(out.get(aEnd).split(";", 2)[0].strip());
+            if (!exitJump.matches()) continue;
+            int edgeLine = aEnd + 1;
+            while (edgeLine < out.size() && out.get(edgeLine).split(";", 2)[0].isBlank()) edgeLine++;
+            if (edgeLine >= out.size() || !out.get(edgeLine).strip().equals(edge + ":")) continue;
+            int bEnd = phiCopyBlockEnd(out, edgeLine + 1);
+            if (bEnd < 0 || !jump.matcher(out.get(bEnd).split(";", 2)[0].strip()).matches()) continue;
+            int exitLine = bEnd + 1;
+            while (exitLine < out.size() && out.get(exitLine).split(";", 2)[0].isBlank()) exitLine++;
+            if (exitLine >= out.size() || !out.get(exitLine).strip().equals(exitJump.group(1) + ":")) continue;
+            List<String> replacement = new ArrayList<>();
+            String raw = out.get(i);
+            int comment = raw.indexOf(';');
+            replacement.add("\t" + cond.group(1) + " "
+                    + (cond.group(2).equalsIgnoreCase("z") ? "NZ" : "Z") + ", " + edge
+                    + (comment < 0 ? "" : " " + raw.substring(comment)));
+            replacement.addAll(out.subList(edgeLine + 1, bEnd + 1));
+            replacement.addAll(out.subList(bEnd + 1, exitLine));
+            replacement.add(out.get(edgeLine));
+            replacement.addAll(out.subList(i + 1, aEnd));
+            int jumpComment = out.get(aEnd).indexOf(';');
+            if (jumpComment >= 0) replacement.add("\t" + out.get(aEnd).substring(jumpComment));
+            replacement.addAll(out.subList(aEnd + 1, edgeLine));
+            out.subList(i, exitLine).clear();
+            out.addAll(i, replacement);
+            i += replacement.size() - 1;
+        }
+        return out;
+    }
+
+    private static int phiCopyBlockEnd(List<String> lines, int first) {
+        int copies = 0;
+        for (int i = first; i < lines.size(); i++) {
+            String core = lines.get(i).split(";", 2)[0].strip();
+            if (core.isEmpty()) continue;
+            // Small LD-only blocks keep relocated short-branch distances bounded.
+            // Reject updating addresses, stack-pointer writes and unknown syntax.
+            if (core.matches("ld (?:x(?:wa|bc|de|hl|ix|iy|iz)[12]?|wa|bc|de|hl|ix|iy|iz|[rq](?:wa|bc|de|hl)[12]|\\(xsp\\+\\d+\\)), [\\w]+|ld (?:x(?:wa|bc|de|hl|ix|iy|iz)[12]?|wa|bc|de|hl|ix|iy|iz), \\(xsp\\+\\d+\\)")) {
+                if (++copies > 8) return -1;
+                continue;
+            }
+            return copies > 0 && core.matches("(?:jr|jrl) \\.Lbb_\\w+") ? i : -1;
+        }
+        return -1;
+    }
+
     static List<String> invertCondJumpPair(List<String> lines) {
         // jrl? CC, .Lbb_target  (short jr or long jrl conditional jump)
         Pattern pCondJr  = Pattern.compile(

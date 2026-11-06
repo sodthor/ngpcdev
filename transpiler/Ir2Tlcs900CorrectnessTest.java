@@ -2137,6 +2137,24 @@ public final class Ir2Tlcs900CorrectnessTest {
             }
     }
 
+    private static void pointerSelects() throws Exception {
+        for (int plane : List.of(0, 1, 2)) {
+            int base = plane == 1 ? 36864 : 38912;
+            String prefix = "  %plane = add i8 " + plane + ", 0\n"
+                + "  %condition = icmp eq i8 %plane, 1\n"
+                + "  %screen = select i1 %condition, ptr inttoptr (i32 36864 to ptr), ptr inttoptr (i32 38912 to ptr)\n";
+            check("pointer_select_base_" + plane, prefix
+                + "  %address = ptrtoint ptr %screen to i32\n  ret i32 %address", 32, base, null);
+            check("pointer_select_tile_" + plane,
+                "  store i16 0, ptr inttoptr (i32 " + (base + 198) + " to ptr)\n"
+                + prefix + "  %row = getelementptr i8, ptr %screen, i32 192\n"
+                + "  %tile = getelementptr i16, ptr %row, i32 3\n"
+                + "  store i16 1573, ptr %tile\n"
+                + "  %result = load i16, ptr inttoptr (i32 " + (base + 198) + " to ptr)\n"
+                + "  ret i16 %result", 16, 1573, null);
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         String[] packs = {"Classic Levels", "Classic II Levels", "Children's Pack",
                 "Confusion Pack", "Impossible Pack", "Panic Pack", "Twister Levels",
@@ -2162,7 +2180,9 @@ public final class Ir2Tlcs900CorrectnessTest {
         output = Files.createTempDirectory("ngpc-correctness-");
         for (int index = 0; index < SEED.length; index++) SEED[index] = (byte) (index + 1);
         System.out.println("Correctness test artifacts: " + output);
-        if (args.length > 0 && args[0].equals("--direct-loads-only")) {
+        if (args.length > 0 && args[0].equals("--pointer-select-only")) {
+            pointerSelects();
+        } else if (args.length > 0 && args[0].equals("--direct-loads-only")) {
             directLoadCopies();
         } else if (args.length > 0 && args[0].equals("--alu-folds-only")) {
             aluFolds();
@@ -2187,6 +2207,7 @@ public final class Ir2Tlcs900CorrectnessTest {
         } else if (args.length > 0 && args[0].equals("--store-select-only")) {
             storeSelectCleanup();
         } else {
+            pointerSelects();
             followups();
             directLoadCopies();
             aluFolds();

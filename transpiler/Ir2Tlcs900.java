@@ -1843,6 +1843,29 @@ public class Ir2Tlcs900 {
             return idx;
         }
 
+        /** Let the loop bridge read header phi entry values in place of the
+         *  predecessor's copies, when every copy into the header is replaced and
+         *  each outside value has a stable home at the end of that predecessor. */
+        void substituteLoopEntryValues(LoopRegisterAllocator.Plan plan, Map<String, int[]> argOffsets) {
+            String pred = plan.entryPredecessor;
+            List<PhiCopy> copies = pred == null || phiCopiesByPred == null ? null : phiCopiesByPred.get(pred);
+            if (copies == null) return;
+            for (String value : plan.entryValues.values()) {
+                if (!value.startsWith("%")) continue;
+                String name = value.substring(1);
+                boolean promoted = name.equals(bcSlotName) || name.equals(deSlotName)
+                    || name.equals(ixSlotName) || name.equals(iySlotName)
+                    || name.equals(izSlotName) || isBankPromoted(name);
+                if (regOnly.contains(name) || xhlOnly.contains(name)
+                        || (!promoted && !slots.containsKey(name) && !argOffsets.containsKey(name))) return;
+            }
+            for (PhiCopy copy : copies)
+                if (copy.targetLabel().equals(plan.header)
+                        && !copy.val().equals(plan.entryValues.get("%" + copy.dstName()))) return;
+            if (!plan.substituteEntryValues()) return;
+            copies.removeIf(copy -> copy.targetLabel().equals(plan.header));
+        }
+
         /** Emit the phi copies registered for the given predecessor block, if any.
          *  Copies are grouped by successor target and each group is lowered as an
          *  independent parallel copy (a phi edge is a simultaneous assignment). */
@@ -3855,6 +3878,7 @@ public class Ir2Tlcs900 {
                 if (autoRegisterAllocation && score < Translator.AUTO_PROFITABILITY_THRESHOLD)
                     throw new LoopRegisterAllocator.Unprofitable(func.name() + ": profitability "
                         + score + " below auto threshold " + Translator.AUTO_PROFITABILITY_THRESHOLD);
+                substituteLoopEntryValues(loopPlan, argOffsets);
             }
             for (int bi = 0; bi < bbs.size(); bi++) {
                 BasicBlock bb = bbs.get(bi);
@@ -4698,12 +4722,21 @@ public class Ir2Tlcs900 {
 
             // -- select (ternary) --
             Matcher mSel = Pattern.compile(
-                "%([^\\s,=]+)\\s*=\\s*select\\s+i1\\s+%([^,]+),\\s*(\\S+)\\s+(%?\\S+),\\s*(\\S+)\\s+(%?\\S+)")
+                "%([^\\s,=]+)\\s*=\\s*select\\s+i1\\s+%([^,]+),\\s*(.*)")
                 .matcher(s);
             if (mSel.matches()) {
+                // Constant-expression arms (notably MMIO inttoptr pointers)
+                // contain spaces and may contain nested commas.
+                List<String> arms = splitCommaDepth(mSel.group(3));
+                if (arms.size() != 2)
+                    throw new IllegalArgumentException("Unsupported select: " + s);
+                Matcher trueArm = Pattern.compile("(\\S+)\\s+(.+)").matcher(arms.get(0).trim());
+                Matcher falseArm = Pattern.compile("(\\S+)\\s+(.+)").matcher(arms.get(1).trim());
+                if (!trueArm.matches() || !falseArm.matches())
+                    throw new IllegalArgumentException("Unsupported select: " + s);
                 emitSelect(mSel.group(1).replaceAll(",$",""), mSel.group(2).replaceAll(",$",""),
-                           mSel.group(3), mSel.group(4).replaceAll(",$",""),
-                           mSel.group(5), mSel.group(6).replaceAll(",$",""), argOffsets);
+                           trueArm.group(1), trueArm.group(2),
+                           falseArm.group(1), falseArm.group(2), argOffsets);
                 return;
             }
 
@@ -7946,6 +7979,9 @@ public class Ir2Tlcs900 {
             emitC9HRuntime(out);
             out.add("\tend");
             out = AsmOptimizer.forwardAllocatedCounters(out);
+            out = AsmOptimizer.trimAllocatedLoopSaves(out, pr.functions.stream()
+                .filter(f -> f.retType().equals("void")).map(IrFunction::name).collect(Collectors.toSet()));
+            out.removeIf(LoopRegisterAllocator.CONTEXT_END::equals);
             out = AsmOptimizer.removeUnusedAllocatedBankSaves(out);
             out = AsmOptimizer.compactAllocatedFrames(out);
             List<String> finalOut = out;
