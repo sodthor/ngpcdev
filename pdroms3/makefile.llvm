@@ -1,0 +1,58 @@
+.SUFFIXES: .c .asm .ll
+NAME = PDROMS3_LLVM
+CC = clang-22
+OPT ?= -O1
+TRUST_BIOS_WRAPPERS ?= true
+# Fixed labels and stack-based arguments in legacy assembly forbid inlining.
+
+all: $(NAME).ngp
+
+LL = main.ll hicolor.ll mplayer.ll flash.ll music.ll img.ll library.ll earth0.ll
+HEADERS = $(shell find . -type f \( -name '*.h' -o -name '*.mh' \))
+
+$(NAME).asm $(NAME).inc &: $(LL) ../transpiler/Ir2Tlcs900.class ../transpiler/AsmOptimizer.class
+	java -Dngpc.trustBiosWrappers=$(TRUST_BIOS_WRAPPERS) -cp ../transpiler Ir2Tlcs900 $(LL) --auto-register-allocation -o $(NAME).asm --data-output $(NAME).inc
+	java -cp ../transpiler AsmOptimizer $(NAME).asm -v --pre-opt-output $(NAME).preopt.asm
+
+../transpiler/Ir2Tlcs900.class: ../transpiler/Ir2Tlcs900.java ../transpiler/AsmOptimizer.java ../transpiler/AsmPatterns.java ../transpiler/LoopRegisterAllocator.java ../transpiler/LoopRegisterAllocator.class
+	cd ../transpiler && javac Ir2Tlcs900.java
+
+../transpiler/LoopRegisterAllocator.class: ../transpiler/LoopRegisterAllocator.java ../transpiler/Ir2Tlcs900.java
+	cd ../transpiler && javac Ir2Tlcs900.java LoopRegisterAllocator.java
+
+../transpiler/AsmOptimizer.class: ../transpiler/AsmOptimizer.java ../transpiler/AsmPatterns.java
+	cd ../transpiler && javac AsmOptimizer.java AsmPatterns.java
+
+$(NAME).ngp: $(NAME).asm $(NAME).inc build.bat
+	@while :; do \
+		wine ./build.bat $(NAME) > .$(NAME).jump-warnings.log 2>&1 || { cat .$(NAME).jump-warnings.log; exit 1; }; \
+		cat .$(NAME).jump-warnings.log; \
+		changed=$$(java -cp ../transpiler Ir2Tlcs900 --shorten-jumps-from-warnings $(NAME).asm .$(NAME).jump-warnings.log) || exit 1; \
+		[ "$$changed" -eq 0 ] && break; \
+	done
+	@rm -f .$(NAME).jump-warnings.log
+
+.c.ll:
+	$(CC) --target=arm-none-eabi -S $(OPT) -ffreestanding -fno-inline -Wall -Wno-main-return-type -emit-llvm -DCLANG $<
+
+$(LL): makefile.llvm .llvm-flags $(HEADERS)
+
+.PHONY: llvm-force clean
+llvm-force:
+
+.llvm-flags: llvm-force
+	@printf '%s\n' '$(CC) $(OPT) trust-bios=$(TRUST_BIOS_WRAPPERS)' | cmp -s - $@ || printf '%s\n' '$(CC) $(OPT) trust-bios=$(TRUST_BIOS_WRAPPERS)' > $@
+
+.PHONY: test
+test: $(NAME).ngp
+	cd ../transpiler && javac sim/tests/PdromsBuildTest.java
+	java -cp ../transpiler sim.tests.PdromsBuildTest $(NAME).ngp $(NAME).map
+	cd ../transpiler && javac sim/tests/Pdroms3EnemyColorTest.java
+	java -cp ../transpiler sim.tests.Pdroms3EnemyColorTest $(NAME).ngp $(NAME).map
+	cd ../transpiler && javac sim/tests/Pdroms3ShootTest.java
+	java -cp ../transpiler sim.tests.Pdroms3ShootTest $(NAME).ngp $(NAME).map
+	cd ../transpiler && javac sim/tests/Pdroms3TrajectoryTest.java
+	java -cp ../transpiler sim.tests.Pdroms3TrajectoryTest $(NAME).ngp $(NAME).map
+
+clean:
+	rm -f $(LL) $(NAME).asm $(NAME).preopt.asm $(NAME).inc $(NAME).p $(NAME).ngp $(NAME).map .$(NAME).jump-warnings.log .llvm-flags

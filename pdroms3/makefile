@@ -1,6 +1,6 @@
 .SUFFIXES: .c .asm .rel .abs .gif .jpg .hh .class .java .mh .bin
 
-NAME = PDROMS3
+NAME = PDROMS3_CC900
 
 JAVA_HOME=c:\temp\jdk1.4.1
 JAVA = $(JAVA_HOME)\bin\java
@@ -21,11 +21,10 @@ FLAGS =	-O3
 DATA = \
 	Bin2C.class
 
-$(NAME).ngp: makefile mclean ngpc.lcf $(DATA) $(OBJS)
+$(NAME).ngp: makefile ngpc.lcf $(DATA) $(OBJS)
 	tulink -la -o $(NAME).abs ngpc.lcf $(OBJS)
 	tuconv -Fs24 $(NAME).abs
 	s242ngp $(NAME).s24
-	../../neopop/neopop-win32
 
 .c.rel:
 	cc900 -c $(FLAGS) $< -o $@
@@ -39,13 +38,9 @@ $(NAME).ngp: makefile mclean ngpc.lcf $(DATA) $(OBJS)
 .java.class:
 	$(JAVAC) $<
 
-mclean:
-	touch main.rel
-	del main.rel
-
 clean:
-	rm *.rel
-	rm *.abs
-	rm *.map 
-	rm *.s24 
-	rm $(NAME).ngp
+	del $(OBJS)
+	del $(NAME).abs
+	del $(NAME).map 
+	del $(NAME).s24 
+	del $(NAME).ngp

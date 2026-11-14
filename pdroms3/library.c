@@ -93,7 +93,11 @@ void SysShutdown()
    __asm(" ldf 3");
    __asm(" add w,w");
    __asm(" add w,w");
+#ifdef CLANG
+   __asm(" ld xix,0fffe00h");
+#else
    __asm(" ld xix,0xfffe00");
+#endif
    __asm(" ld xix,(xix+w)");
    __asm(" call xix");
 }
@@ -111,7 +115,11 @@ void SysSetSystemFont()
    __asm(" ldf 3");
    __asm(" add w,w");
    __asm(" add w,w");
+#ifdef CLANG
+   __asm(" ld xix,0fffe00h");
+#else
    __asm(" ld xix, 0xfffe00");
+#endif
    __asm(" ld xix,(xix+w)");
    __asm(" call xix");
 }
@@ -360,7 +368,7 @@ void PrintString(u8 Plane, u8 Palette, u8 XPos, u8 YPos, const char * theString)
 //////////////////////////////////////////////////////////////////////////////
 void SetSprite(u8 SpriteNo, u16 TileNo, u8 XPos, u8 YPos, u8 PaletteNo, u8 Ctrl)
 {
-   u16 *theSprite = SPRITE_RAM;
+   u16 *theSprite = (u16*)SPRITE_RAM;
    u8  *theSpriteCol = SPRITE_COLOUR;
 
    theSprite += (SpriteNo<<1);
@@ -416,6 +424,9 @@ void SeedRandom(void)
 // the compiler :-0
 s32 Multiply32bit(s32 Value1, s32 Value2)
 {
+#ifdef CLANG
+   return (s32)((u32)Value1 * (u32)Value2);
+#else
    __ASM("  LD      XWA, (XSP+4)");
    __ASM("  LD      XBC, (XSP+8)");
    __ASM("  LD		HL,QWA");
@@ -429,6 +440,7 @@ s32 Multiply32bit(s32 Value1, s32 Value2)
    __ASM("  ADD		XHL,XWA");
 
    return __XHL;
+#endif
 }
 
 //////////////////////////////////////////////////////////////////////////////

@@ -1,13 +1,16 @@
 #include "ngpc.h"
+#include "library.h"
 
 void hc_load(void *img)
 {
+#ifndef CLANG
 __ASM("	_SCR1RAM	equ	0x9000	");
 __ASM("	_SCR2RAM	equ	0x9800	");
 __ASM("	_TILERAM	equ	0xA000	");
 __ASM("	_SCR1PAL	equ	0x8280	");
 __ASM("	_SCR2PAL	equ	0x8300	");
 __ASM("	rRASV		equ	0x8009	");
+#endif
 __ASM("	DYN		equ	6080	");
 __ASM("	IDX		equ	14592	");
 

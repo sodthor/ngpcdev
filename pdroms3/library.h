@@ -10,6 +10,7 @@
  * Function Prototypes contained within the library
  */
 void InitNGPC(void);
+void SysShutdown(void);
 void InstallTileSet(const unsigned short Tiles[][8], u16 Len);
 
 void ClearScreen(u8 ScrollPlane);
