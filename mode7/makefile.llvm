@@ -1,26 +1,29 @@
 .SUFFIXES: .c .asm .ll
-NAME = MODE7
+NAME = MODE7_LLVM
 
 # LLVM C compiler — works with clang-18 and clang-22. Override: make -f makefile.llvm CC=clang-22
 CC = clang-22
-OPT ?= -O3
+OPT ?= -O1
+# Fail-closed allocated-renderer specialization. Disable for A/B builds with =0.
+MODE7_GROUP_BOUNDS ?= 1
 
 all: ngpc.lcf $(NAME).ngp
 
 LL = main.ll music.ll library.ll
 
-$(NAME).asm $(NAME).inc: $(LL) ../transpiler/Ir2Tlcs900.class ../transpiler/AsmOptimizer.class
+$(NAME).asm $(NAME).inc: $(LL) ../transpiler/Ir2Tlcs900.class ../transpiler/AsmOptimizer.class ../transpiler/mode7_group_bounds.py ../transpiler/fixtures/mode7_update_allocated.asm
 	java -cp ../transpiler Ir2Tlcs900 $(LL) --auto-register-allocation -o $(NAME).asm --data-output $(NAME).inc
 	java -cp ../transpiler AsmOptimizer $(NAME).asm -v --pre-opt-output $(NAME).preopt.asm
+	@if [ "$(MODE7_GROUP_BOUNDS)" = 1 ]; then python3 ../transpiler/mode7_group_bounds.py $(NAME).asm; fi
 
-../transpiler/Ir2Tlcs900.class: ../transpiler/Ir2Tlcs900.java ../transpiler/AsmOptimizer.java ../transpiler/LoopRegisterAllocator.java ../transpiler/LoopRegisterAllocator.class
+../transpiler/Ir2Tlcs900.class: ../transpiler/Ir2Tlcs900.java ../transpiler/AsmOptimizer.java ../transpiler/AsmPatterns.java ../transpiler/LoopRegisterAllocator.java ../transpiler/LoopRegisterAllocator.class
 	cd ../transpiler && javac Ir2Tlcs900.java
 
 ../transpiler/LoopRegisterAllocator.class: ../transpiler/LoopRegisterAllocator.java ../transpiler/Ir2Tlcs900.java
 	cd ../transpiler && javac Ir2Tlcs900.java LoopRegisterAllocator.java
 
-../transpiler/AsmOptimizer.class: ../transpiler/AsmOptimizer.java
-	cd ../transpiler && javac AsmOptimizer.java
+../transpiler/AsmOptimizer.class: ../transpiler/AsmOptimizer.java ../transpiler/AsmPatterns.java
+	cd ../transpiler && javac AsmOptimizer.java AsmPatterns.java
 
 $(NAME).ngp: %.ngp: %.asm %.inc
 	@while :; do \
@@ -32,7 +35,7 @@ $(NAME).ngp: %.ngp: %.asm %.inc
 	@rm -f .$*.jump-warnings.log
 
 .c.ll:
-	$(CC) --target=arm-none-eabi -S $(OPT) -Wall -emit-llvm -DCLANG $<
+	$(CC) --target=arm-none-eabi -S $(OPT) -Wall -Wno-main-return-type -emit-llvm -DCLANG $<
 
 $(LL): makefile.llvm .llvm-flags
 
@@ -40,11 +43,14 @@ $(LL): makefile.llvm .llvm-flags
 llvm-force:
 
 .llvm-flags: llvm-force
-	@printf '%s\n' '$(CC) $(OPT)' | cmp -s - $@ || printf '%s\n' '$(CC) $(OPT)' > $@
+	@printf '%s\n' '$(CC) $(OPT) group-bounds=$(MODE7_GROUP_BOUNDS)' | cmp -s - $@ || printf '%s\n' '$(CC) $(OPT) group-bounds=$(MODE7_GROUP_BOUNDS)' > $@
 
 bench: $(NAME).ngp
 	cd ../transpiler && java -cp . sim.mode7.Mode7MotionBench ../mode7/$(NAME).ngp ../mode7/$(NAME).map --verify
 
+.PHONY: validate-group-bounds
+validate-group-bounds:
+	python3 ../transpiler/validate_mode7_group_bounds.py --cc=$(CC) --opt=$(OPT)
+
 clean:
 	rm -f *.ll $(NAME).asm $(NAME).preopt.asm $(NAME).inc $(NAME).p $(NAME).ngp .jump-warnings.log .$(NAME).jump-warnings.log .llvm-flags
-

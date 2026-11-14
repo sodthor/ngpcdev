@@ -1,0 +1,1 @@
+clang-22 -O1 group-bounds=1
