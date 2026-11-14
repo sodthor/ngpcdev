@@ -170,6 +170,7 @@ public final class Ir2Tlcs900CorrectnessTest {
         for (AsmOptimizer.ProtectedFunction f : AsmOptimizer.protectedFunctions(lines)) {
             List<String> solo = new ArrayList<>();
             solo.add("; experimental-loop-register-allocation");
+            if (lines.contains(AsmPatterns.BANK_ZERO_ABI)) solo.add(AsmPatterns.BANK_ZERO_ABI);
             solo.addAll(lines.subList(f.start(), f.end()));
             // Provide any C9H helper label the body may reference so cleanup passes
             // behave the same as in-context; harmless if unreferenced.
@@ -2081,6 +2082,103 @@ public final class Ir2Tlcs900CorrectnessTest {
     }
 
     private static void followups() throws Exception {
+        // The pointer is reused after the first load, forcing a durable home
+        // rather than the single-consumer XHL shortcut. O3 unrolled palette
+        // uploads exercise this distinction between pointer and scalar homes.
+        for (int bits : new int[]{8, 16, 32}) {
+            checkModule("promoted_pointer_deref_" + bits, """
+                define i32 @probe() {
+                  store i32 37, ptr inttoptr (i32 16384 to ptr)
+                  store ptr inttoptr (i32 16384 to ptr), ptr inttoptr (i32 16448 to ptr)
+                  %p = load volatile ptr, ptr inttoptr (i32 16448 to ptr)
+                """ + "  %a = load volatile i" + bits + ", ptr %p\n"
+                + "  %b = load volatile i" + bits + ", ptr %p\n"
+                + (bits < 32 ? "  %aa = zext i" + bits + " %a to i32\n  %bb = zext i" + bits + " %b to i32\n  %r = add i32 %aa, %bb\n"
+                             : "  %r = add i32 %a, %b\n")
+                + "  ret i32 %r\n}\n", 32, 74, null);
+        }
+        RawAsmClobberTest.main(new String[0]);
+        var gepEmitter = new Ir2Tlcs900.FuncTranslator(
+            new Ir2Tlcs900.IrFunction("struct_gep", "void", "", new ArrayList<>()), Set.of(),
+            Map.of("Shot", Ir2Tlcs900.computeStructLayout("i8, i8, i8, i8, i8, i8")));
+        gepEmitter.slots.put("result", new int[]{0, 4});
+        gepEmitter.emitGEP("result", "%struct.Shot, ptr getelementptr (i8, ptr @storage, i32 96), i32 2", Map.of());
+        require(gepEmitter.out.contains("\tlda xhl, _storage") && gepEmitter.out.contains("\tadd xhl, 108")
+            && gepEmitter.out.stream().noneMatch(line -> line.contains("unhandled")),
+            "struct over inline constant GEP exact address");
+        checkModule("nested_struct_array_stride", """
+            %struct.Shot = type { i8, i8, i8, i8, i8, i8 }
+            define i32 @probe() {
+              %result = call i32 @offset(ptr inttoptr (i32 16384 to ptr))
+              ret i32 %result
+            }
+            define i32 @offset(ptr %storage) {
+              %base = ptrtoint ptr %storage to i32
+              %shot = getelementptr [2 x [16 x %struct.Shot]], ptr %storage, i32 0, i32 1, i32 2
+              %ptr = ptrtoint ptr %shot to i32
+              %offset = sub i32 %ptr, %base
+              ret i32 %offset
+            }
+            """, 32, 96 + 12, null);
+        // Pointer values loaded from globals and GEP-selected pointer cells
+        // must be dereferenced before their immediate load/store consumer.
+        for (boolean store : new boolean[]{false, true}) {
+            checkModule("loaded_pointer_cell_" + store, """
+                define i32 @probe() {
+                  store i32 11, ptr inttoptr (i32 16384 to ptr)
+                  store i32 37, ptr inttoptr (i32 16388 to ptr)
+                  store ptr inttoptr (i32 16388 to ptr), ptr inttoptr (i32 16448 to ptr)
+                  %cell = getelementptr i8, ptr inttoptr (i32 16444 to ptr), i32 4
+                  %p = load ptr, ptr %cell
+                """ + (store ? "  store i32 53, ptr %p\n  ret i32 53\n}\n"
+                             : "  %v = load i32, ptr %p\n  ret i32 %v\n}\n"),
+                32, store ? 53 : 37, null);
+        }
+        var nestedTypes = Ir2Tlcs900.parseIR("""
+            %struct.Outer = type { i8, %struct.Inner, i16, [5 x i8] }
+            %struct.Inner = type { i8, i8, i8, i8, i8, i8 }
+            """).structLayouts;
+        require(nestedTypes.get("Inner").size() == 6 && nestedTypes.get("Inner").alignment() == 1,
+            "byte aggregate size/alignment");
+        require(Arrays.equals(nestedTypes.get("Outer").fieldOffsets(), new int[]{0, 1, 8, 10})
+            && nestedTypes.get("Outer").size() == 16, "nested aggregate and array alignment");
+        checkModule("escaped_alloca_call", """
+            define i32 @probe() {
+              %x = alloca i8, align 1
+              %y = alloca i8, align 1
+              store i8 32, ptr %x
+              store i8 40, ptr %y
+              call void @mutate(ptr %x, ptr %y)
+              %a = load i8, ptr %x
+              %b = load i8, ptr %y
+              %aa = zext i8 %a to i32
+              %bb = zext i8 %b to i32
+              %r = add i32 %aa, %bb
+              ret i32 %r
+            }
+            define void @mutate(ptr %x, ptr %y) {
+              %a = load i8, ptr %x
+              %b = load i8, ptr %y
+              %c = add i8 %a, 1
+              %d = add i8 %b, 2
+              store i8 %c, ptr %x
+              store i8 %d, ptr %y
+              ret void
+            }
+            """, 32, 75, null);
+        checkModule("distinct_stack_call_arguments", """
+            define i32 @probe() {
+              %r = call i32 @combine(i16 17, i16 70)
+              ret i32 %r
+            }
+            define i32 @combine(i16 %x, i16 %y) {
+              %a = zext i16 %x to i32
+              %b = zext i16 %y to i32
+              %c = mul i32 %a, 100
+              %r = add i32 %c, %b
+              ret i32 %r
+            }
+            """, 32, 1770, null);
         AsmOptimizerFollowupTest.main(new String[0]);
         List<String> frame = AsmOptimizerFollowupTest.frame();
         byte[] frameMemory = SEED.clone();
@@ -2155,6 +2253,25 @@ public final class Ir2Tlcs900CorrectnessTest {
         }
     }
 
+    private static void absIntrinsics() throws Exception {
+        for (int bits : new int[]{8, 16, 32}) {
+            int minimum = bits == 32 ? Integer.MIN_VALUE : -(1 << (bits - 1));
+            for (int value : new int[]{minimum, minimum + 1, -123, -1, 0, 1, 123}) {
+                // Load from memory so the backend cannot constant-fold the operand.
+                byte[] memory = SEED.clone();
+                for (int i = 0; i < bits / 8; i++) memory[i] = (byte)(value >>> (i * 8));
+                checkModule("abs_" + bits + "_" + Integer.toUnsignedString(value),
+                    "define i" + bits + " @probe() {\nentry:\n"
+                    + "  store i" + bits + " " + value + ", ptr inttoptr (i32 16384 to ptr)\n"
+                    + "  %v = load volatile i" + bits + ", ptr inttoptr (i32 16384 to ptr)\n"
+                    + "  %r = call i" + bits + " @llvm.abs.i" + bits + "(i" + bits + " %v, i1 false)\n"
+                    + "  ret i" + bits + " %r\n}\n"
+                    + "declare i" + bits + " @llvm.abs.i" + bits + "(i" + bits + ", i1 immarg)\n",
+                    bits, Math.abs(value), memory);
+            }
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         String[] packs = {"Classic Levels", "Classic II Levels", "Children's Pack",
                 "Confusion Pack", "Impossible Pack", "Panic Pack", "Twister Levels",
@@ -2180,7 +2297,9 @@ public final class Ir2Tlcs900CorrectnessTest {
         output = Files.createTempDirectory("ngpc-correctness-");
         for (int index = 0; index < SEED.length; index++) SEED[index] = (byte) (index + 1);
         System.out.println("Correctness test artifacts: " + output);
-        if (args.length > 0 && args[0].equals("--pointer-select-only")) {
+        if (args.length > 0 && args[0].equals("--abs-only")) {
+            absIntrinsics();
+        } else if (args.length > 0 && args[0].equals("--pointer-select-only")) {
             pointerSelects();
         } else if (args.length > 0 && args[0].equals("--direct-loads-only")) {
             directLoadCopies();
@@ -2207,6 +2326,7 @@ public final class Ir2Tlcs900CorrectnessTest {
         } else if (args.length > 0 && args[0].equals("--store-select-only")) {
             storeSelectCleanup();
         } else {
+            absIntrinsics();
             pointerSelects();
             followups();
             directLoadCopies();

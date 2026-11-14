@@ -6,6 +6,9 @@ import java.util.OptionalLong;
 
 /**
  * Standalone TLCS-900 assembly post-processor for transpiler-generated .asm files.
+ * Active generic patterns and deliberately undispatched historical game windows
+ * are inventoried in docs/OPTIMIZER_GENERICITY.md. Historical implementations
+ * remain for regression-fixture comparisons, not as production fallbacks.
  *
  * Usage:
  *   java AsmOptimizer input.asm [output.asm] [-v] [--dry-run]
@@ -73,9 +76,10 @@ public class AsmOptimizer {
             new Pass("foldAddSubToIncDec",           AsmOptimizer::foldAddSubToIncDec),
             new Pass("foldImmLoadThroughAcc",        AsmOptimizer::foldImmLoadThroughAcc),
             new Pass("eliminateDeadWaZeroBeforeExtz",AsmOptimizer::eliminateDeadWaZeroBeforeExtz),
-            new Pass("eliminateDeadSlotStore",          AsmOptimizer::eliminateDeadSlotStore),
+            new Pass("eliminateUnreadPrivateStores", AsmOptimizer::eliminateUnreadPrivateStores),
             new Pass("eliminateRedundantXorWW",      AsmOptimizer::eliminateRedundantXorWW),
             new Pass("eliminateByteMasksBeforeExtz", AsmOptimizer::eliminateByteMasksBeforeExtz),
+            new Pass("simplifyByteMaskChains", AsmPatterns::simplifyByteMaskChains, true),
             // mergeConsecutiveShifts: RE-ENABLED. Collapses runs of same-reg shifts
             // into minimal count-1..16 instructions (0=>16 nibble, emitted as literal 16;
             // asl rejects a literal 0). The earlier revert was an implementation defect:
@@ -84,12 +88,9 @@ public class AsmOptimizer {
             // DOES render correctly on real MODE7 hardware (confirmed by hand-merge).
             // Flags are guarded dead before merging. See memory asl-shift-count-write-16-not-0.
             new Pass("mergeConsecutiveShifts",       AsmOptimizer::mergeConsecutiveShifts),
-            new Pass("foldTrackAddressComputation",  AsmOptimizer::foldTrackAddressComputation),
-            new Pass("foldColorSaveToXhl",           AsmOptimizer::foldColorSaveToXhl),
-            new Pass("eliminateDeadPhiOutputStores",   AsmOptimizer::eliminateDeadPhiOutputStores),
-            new Pass("foldColorAndBitTestToRegBit",  AsmOptimizer::foldColorAndBitTestToRegBit),
-            new Pass("hoistBoundsCheckBeforeAccShift", AsmOptimizer::hoistBoundsCheckBeforeAccShift),
-            new Pass("foldIncrCounterPhiRoundtrip",   AsmOptimizer::foldIncrCounterPhiRoundtrip),
+            // Historical track/color/bounds windows are intentionally not run:
+            // their exact game sequence is not a liveness or aliasing proof.
+            new Pass("foldRestoredSingleBitTests", AsmPatterns::foldRestoredSingleBitTests),
             new Pass("removeRedundantExtz",          AsmOptimizer::removeRedundantExtz),
             new Pass("foldReloadIntoAluMemOperand",  AsmOptimizer::foldReloadIntoAluMemOperand),
             new Pass("foldPushImmediate",            AsmOptimizer::foldPushImmediate),
@@ -99,29 +100,34 @@ public class AsmOptimizer {
             new Pass("removeUnreferencedLabels[2]",  AsmOptimizer::removeUnreferencedLabels),
             new Pass("eliminateRedundantRegLoads",   AsmOptimizer::eliminateRedundantRegLoads),
             new Pass("removeUnusedFrame",            AsmOptimizer::removeUnusedFrame),
-            new Pass("foldXhlAccumulatorRoundtrip",  AsmOptimizer::foldXhlAccumulatorRoundtrip, true),
+            new Pass("foldAluRegisterRoundtrip",  AsmOptimizer::foldXhlAccumulatorRoundtrip, true),
             new Pass("eliminateRegisterRoundtrip",   AsmOptimizer::eliminateRegisterRoundtrip, true),
-            new Pass("foldXhlLoadAddRoundtrip",      AsmOptimizer::foldXhlLoadAddRoundtrip, true),
+            new Pass("foldAluReloadRoundtrip",      AsmOptimizer::foldXhlLoadAddRoundtrip, true),
             new Pass("foldSpillReloadAdd",           AsmOptimizer::foldSpillReloadAdd, true),
-            new Pass("foldXhlImmAddToMem",           AsmOptimizer::foldXhlImmAddToMem, true),
+            new Pass("foldImmediateAluStore",       AsmOptimizer::foldXhlImmAddToMem, true),
             new Pass("invertCondJumpPair",           AsmOptimizer::invertCondJumpPair, true),
-            new Pass("foldColorAndBitTestToRegBit[2]", AsmOptimizer::foldColorAndBitTestToRegBit),
-            new Pass("eliminateDeadPhiOutputStores[2]", AsmOptimizer::eliminateDeadPhiOutputStores),
+            new Pass("eliminateUnreadPrivateStores[2]", AsmOptimizer::eliminateUnreadPrivateStores),
             new Pass("eliminateOverwrittenSpills", AsmOptimizer::eliminateOverwrittenSpills),
             new Pass("forwardPhiAccumulators", AsmOptimizer::forwardPhiAccumulators),
-            new Pass("forwardShiftedAccumulators", AsmOptimizer::forwardShiftedAccumulators),
             new Pass("rescheduleAccumulatorCoordinates", AsmOptimizer::rescheduleAccumulatorCoordinates),
-            new Pass("scheduleAddressOffsets", AsmOptimizer::scheduleAddressOffsets),
             new Pass("eliminateOverwrittenSpills[2]", AsmOptimizer::eliminateOverwrittenSpills),
             new Pass("foldShiftedWordSubtract", AsmOptimizer::foldShiftedWordSubtract),
             new Pass("fuseZeroExtendedByteLoads", AsmOptimizer::fuseZeroExtendedByteLoads),
             new Pass("foldDirectLoadCopies", AsmOptimizer::foldDirectLoadCopies, true),
             new Pass("foldSavedByteAddress", AsmOptimizer::foldSavedByteAddress, true),
+            new Pass("cleanupRegisterValuesAndSaves", AsmPatterns::cleanupRegisterValuesAndSaves, true),
             new Pass("removeUnusedIndexSaves", AsmOptimizer::removeUnusedIndexSaves, true),
             new Pass("promoteAllocatedFrameSlots", AsmOptimizer::promoteAllocatedFrameSlots, true),
             new Pass("compactAllocatedFrames[post-promotion]", AsmOptimizer::compactAllocatedFrames, true),
             new Pass("foldComputedRegisterCopies", AsmOptimizer::foldComputedRegisterCopies, true),
-            new Pass("layoutPhiCopyBranches", AsmOptimizer::layoutPhiCopyBranches, true)
+            new Pass("layoutPhiCopyBranches", AsmOptimizer::layoutPhiCopyBranches, true),
+            new Pass("foldMasksThroughLogicalShifts", AsmPatterns::foldMasksThroughLogicalShifts, true),
+            new Pass("narrowZeroExtendedByteShifts", AsmPatterns::narrowZeroExtendedByteShifts, true),
+            new Pass("foldByteMemoryCounters", AsmPatterns::foldByteMemoryCounters, true),
+            // Late allocation/address/mask passes expose dead lanes after the
+            // earlier cleanup. Reuse its own fixed point rather than leaving
+            // dead normalizations/reloads for a second standalone invocation.
+            new Pass("cleanupRegisterValuesAndSaves[final]", AsmPatterns::cleanupRegisterValuesAndSaves, true)
         );
 
         for (Pass p : passes) {
@@ -989,6 +995,10 @@ public class AsmOptimizer {
     // Conservative: any unrecognized write to DST or SRC flushes the entry.
     // =========================================================================
     static List<String> eliminateRedundantRegReload(List<String> lines) {
+        return AsmPatterns.eliminateRedundantLoads(lines);
+    }
+
+    private static List<String> legacyRedundantRegReload(List<String> lines) {
         // Patterns
         Pattern pLd = Pattern.compile(
             "^\\s+ld\\s+(x?[a-z][a-z0-9]*),\\s*(.+?)\\s*(?:;.*)?$",
@@ -1253,7 +1263,7 @@ public class AsmOptimizer {
     // Pass: mergeConsecutiveShifts
     //
     // Collapse runs of consecutive sla/srl/sra N, REG into a minimal sequence
-    // of ≤8-count shifts (TLCS-900 max per instruction).
+    // of <=16-count shifts (TLCS-900 max per instruction).
     //
     // Key wins in _update:
     //   sla 7 + sla 7 + sla 2 → sla 8 + sla 8  (saves 1 instruction, x8 in loop)
@@ -1322,6 +1332,9 @@ public class AsmOptimizer {
                 // flag consumers also terminate
                 String t = l.toLowerCase(Locale.ROOT);
                 if (asmConsumesFlags(t)) break;
+                // Do not move a merged flag writer across another flag
+                // writer, status change or instruction of unknown effects.
+                if (!asmNeutralForFlags(t) || t.matches(".*\\b(?:sr|f|rfp)\\b.*")) break;
             }
 
             // Only rewrite if run has ≥2 instructions
@@ -1441,6 +1454,10 @@ public class AsmOptimizer {
     // decodes them for msz>=2 — see memory [[mode7-logical-mem-operand-alu]].
     // =========================================================================
     static List<String> foldReloadIntoAluMemOperand(List<String> lines) {
+        return AsmPatterns.foldReloadAlu(lines);
+    }
+
+    private static List<String> legacyReloadIntoAluMemOperand(List<String> lines) {
         Pattern pLoad = Pattern.compile(
             "^\\s+ld\\s+(xwa|wa),\\s*(\\(xsp\\+(\\d+)\\))\\s*(?:;.*)?$",
             Pattern.CASE_INSENSITIVE);
@@ -1517,6 +1534,10 @@ public class AsmOptimizer {
     // Ported from Ir2Tlcs900.java.
     // =========================================================================
     static List<String> foldPushImmediate(List<String> lines) {
+        return AsmPatterns.foldPushImmediates(lines);
+    }
+
+    private static List<String> legacyPushImmediate(List<String> lines) {
         Pattern pLdWa = Pattern.compile(
             "^\\s+ld\\s+wa,\\s*(-?(?:0x[0-9a-f]+|[0-9][0-9a-f]*h|[0-9]+))\\s*(?:;.*)?$",
             Pattern.CASE_INSENSITIVE);
@@ -1554,6 +1575,10 @@ public class AsmOptimizer {
     // Ported from Ir2Tlcs900.java.
     // =========================================================================
     static List<String> eliminateByteMasksBeforeExtz(List<String> lines) {
+        return AsmPatterns.eliminateByteMasksBeforeExtend(lines);
+    }
+
+    private static List<String> legacyByteMasksBeforeExtz(List<String> lines) {
         Pattern mask = Pattern.compile("^\\s+and\\s+wa,\\s*(?:0ffh|255|0xff)\\s*(?:;.*)?$", Pattern.CASE_INSENSITIVE);
         Pattern extend = Pattern.compile("^\\s+extz\\s+wa\\s*(?:;.*)?$", Pattern.CASE_INSENSITIVE);
         Pattern label = Pattern.compile("^[.\\w].*:.*$");
@@ -1583,7 +1608,7 @@ public class AsmOptimizer {
             if (comma < 0) continue;
             String lhs = ops.substring(0, comma).trim();
             String rhs = ops.substring(comma + 1).trim();
-            if (!(lhs.equals("a") || lhs.equals("wa") || lhs.equals("xwa"))) continue;
+            if (AsmPatterns.width(lhs) == 0) continue;
             if (!(rhs.equals("0") || rhs.equals("0h") || rhs.equals("00h")
                     || rhs.equals("0000h") || rhs.equals("00000000h"))) continue;
             int j = i + 1;
@@ -1675,8 +1700,9 @@ public class AsmOptimizer {
         Matcher mJ = Pattern.compile("^(?:jr|jrl|jp)\\s+([a-z]+)\\s*,").matcher(t);
         if (mJ.find()) {
             String cc = mJ.group(1).toUpperCase(Locale.ROOT);
-            Set<String> cond = Set.of("Z","NZ","LT","GE","GT","LE","C","NC","UGT","ULE","ULT","UGE","EQ","NE");
-            return cond.contains(cc);
+            // Every conditional branch reads flags, including MI/PL/V/NV and
+            // unfamiliar assembler aliases. A missing alias must not mean dead.
+            return !cc.isEmpty();
         }
         return false;
     }
@@ -1686,12 +1712,14 @@ public class AsmOptimizer {
             || t.startsWith("add ") || t.startsWith("sub ")
             || t.startsWith("and ") || t.startsWith("or ") || t.startsWith("xor ")
             || t.startsWith("sla ") || t.startsWith("sra ") || t.startsWith("srl ")
-            || t.startsWith("neg ")
-            || t.startsWith("bit ");
+            || t.startsWith("neg ");
     }
 
     static boolean asmNeutralForFlags(String t) {
         if (t.startsWith("ld ") || t.startsWith("lda ")) return true;
+        // EXTZ changes only the upper register lanes, not status flags.
+        // A later logical operation may kill the preceding shift's flags.
+        if (t.matches("extz (?:wa|bc|de|hl|ix|iy|iz|xwa|xbc|xde|xhl|xix|xiy|xiz)")) return true;
         if (t.startsWith("push ") || t.startsWith("pop ") || t.startsWith("pushw ")) return true;
         if (t.equals("di") || t.equals("ei")) return true;
         return false;
@@ -1721,6 +1749,10 @@ public class AsmOptimizer {
     // Ported from Ir2Tlcs900.java.
     // =========================================================================
     static List<String> foldStackLoadMovePairs(List<String> lines) {
+        return foldDirectLoadCopies(lines);
+    }
+
+    private static List<String> legacyStackLoadMovePairs(List<String> lines) {
         Pattern pLdWaStack  = Pattern.compile("^\\s+ld\\s+wa,\\s*(\\(xsp\\+[^)]+\\))\\s*(?:;.*)?$",
                                               Pattern.CASE_INSENSITIVE);
         Pattern pLdXwaStack = Pattern.compile("^\\s+ld\\s+xwa,\\s*(\\(xsp\\+[^)]+\\))\\s*(?:;.*)?$",
@@ -1769,9 +1801,9 @@ public class AsmOptimizer {
     // Ported from Ir2Tlcs900.java.
     // =========================================================================
     static List<String> removeRedundantOrAfterAndForZeroBranch(List<String> lines) {
-        Pattern pAnd   = Pattern.compile("^\\s+and\\s+(a|wa|xwa),\\s*([^\\s;]+)\\s*(?:;.*)?$",
+        Pattern pAnd   = Pattern.compile("^\\s+and\\s+([wabcdehl]|x?(?:wa|bc|de|hl)),\\s*([^\\s;]+)\\s*(?:;.*)?$",
                                          Pattern.CASE_INSENSITIVE);
-        Pattern pOrSelf = Pattern.compile("^\\s+or\\s+(a|wa|xwa),\\s*(a|wa|xwa)\\s*(?:;.*)?$",
+        Pattern pOrSelf = Pattern.compile("^\\s+or\\s+([wabcdehl]|x?(?:wa|bc|de|hl)),\\s*([wabcdehl]|x?(?:wa|bc|de|hl))\\s*(?:;.*)?$",
                                           Pattern.CASE_INSENSITIVE);
         Pattern pJ     = Pattern.compile("^\\s+(?:jr|jrl|jp)\\s+([a-z]+)\\s*,\\s*([^;]+?)\\s*(?:;.*)?$",
                                          Pattern.CASE_INSENSITIVE);
@@ -1786,7 +1818,16 @@ public class AsmOptimizer {
             if (!mAnd.matches()) continue;
             String andReg = mAnd.group(1).toLowerCase(Locale.ROOT);
             int j = i + 1;
-            while (j < out.size() && out.get(j).matches("^\\s*(;.*)?$")) j++;
+            while (j < out.size()) {
+                AsmPatterns.Instruction copy = AsmPatterns.parse(out.get(j));
+                if (copy.op().isEmpty()) { j++; continue; }
+                // Flag-neutral ordinary register copies may save the tested
+                // value without changing it. No memory auto-update or bank state.
+                if (copy.op().equals("ld") && AsmPatterns.width(copy.left()) != 0
+                        && AsmPatterns.width(copy.left()) == AsmPatterns.width(copy.right())
+                        && !AsmPatterns.aliases(andReg).contains(copy.left())) { j++; continue; }
+                break;
+            }
             if (j >= out.size() || pLabel.matcher(out.get(j).trim()).matches()) continue;
             Matcher mOr = pOrSelf.matcher(out.get(j));
             if (!mOr.matches()) continue;
@@ -1815,7 +1856,8 @@ public class AsmOptimizer {
 
     static boolean lowByteMaskDefinesZero(String source, String destination, String immediate) {
         OptionalLong mask = parseAsmImmediate(immediate);
-        return (source.equals("wa") || source.equals("xwa")) && destination.equals("a")
+        String pair = source.startsWith("x") ? source.substring(1) : source;
+        return pair.matches("wa|bc|de|hl") && destination.equals(pair.substring(1))
             && mask.isPresent() && mask.getAsLong() >= 0 && mask.getAsLong() <= 255;
     }
 
@@ -1841,7 +1883,7 @@ public class AsmOptimizer {
                 work.add(i + 1);
             } else if (t.matches("(?:cp|add|sub|and|or|xor)\\s+.+")) {
                 // All flags potentially changed by the removed OR are now overwritten.
-            } else if (t.matches("(?:ld|lda)\\s+.+") && !t.matches(".*\\b(?:sr|f|rfp)\\b.*")) {
+            } else if (t.matches("(?:ld|lda|extz|inc|dec)\\s+.+") && !t.matches(".*\\b(?:sr|f|rfp)\\b.*")) {
                 work.add(i + 1);
             } else {
                 Matcher jump = Pattern.compile("(?:jr|jrl|jp)\\s+([.\\w$]+)").matcher(t);
@@ -1855,11 +1897,11 @@ public class AsmOptimizer {
     // =========================================================================
     // Pass: foldAddSubToIncDec
     //
-    // add R, N  →  inc N, R   (N = 1..8, carry flag dead after)
-    // sub R, N  →  dec N, R   (N = 1..8, carry flag dead after)
+    // add R, N  →  inc N, R   (N = 1..8, affected flags dead after)
+    // sub R, N  →  dec N, R   (N = 1..8, affected flags dead after)
     //
-    // TLCS-900: INC/DEC preserve carry; ADD/SUB set it.
-    // Only applied when carry is dead (clobbered before next consumer).
+    // TLCS-900 register INC/DEC preserve flags; ADD/SUB set them.
+    // Require a complete flag overwrite before any consumer, not just dead carry.
     // =========================================================================
     static List<String> foldAddSubToIncDec(List<String> lines) {
         Pattern pAdd = Pattern.compile(
@@ -1878,8 +1920,8 @@ public class AsmOptimizer {
             String reg    = m.group(3).toLowerCase(Locale.ROOT);
             int    n      = Integer.parseInt(m.group(4));
 
-            // Check carry dead after this instruction
-            if (!carryDeadAfter(out, i, pLabel)) continue;
+            // Check affected flags dead after this instruction
+            if (!flagsAreDeadAfterLine(out, i, pLabel)) continue;
 
             String mnem = op.equals("add") ? "inc" : "dec";
             out.set(i, indent + mnem + " " + n + ", " + reg);
@@ -1923,6 +1965,10 @@ public class AsmOptimizer {
     // load an immediate directly into any 32-bit register.
     // =========================================================================
     static List<String> foldImmLoadThroughAcc(List<String> lines) {
+        return foldDirectLoadCopies(lines);
+    }
+
+    private static List<String> legacyImmLoadThroughAcc(List<String> lines) {
         Pattern pLdXwaImm = Pattern.compile(
             "^(\\s+)ld\\s+xwa,\\s*(-?(?:0x[0-9a-fA-F]+|[0-9][0-9a-fA-F]*[hH]?|[0-9]+))\\s*(?:;.*)?$",
             Pattern.CASE_INSENSITIVE);
@@ -2228,7 +2274,9 @@ public class AsmOptimizer {
     //
     // The transpiler emits `xor w, w` before every byte->word zero-extend. When
     // several byte operations run back to back with no word-write to w in between,
-    // every `xor w, w` after the first is a dead re-clear.
+    // every `xor w, w` after the first is a dead re-clear. AND word/wide,low8
+    // also establishes a zero high byte. Track all four byte-register pairs;
+    // writes to the low byte preserve the high-byte fact.
     //
     // SAFETY:
     //   1. w must still be provably 0 at the second xor -- NOTHING between the two
@@ -2240,6 +2288,10 @@ public class AsmOptimizer {
     // Bomberman: 233 removals. MODE7: 0 (word-math hot path). SAMPLE_2: 6.
     // =========================================================================
     static List<String> eliminateRedundantXorWW(List<String> lines) {
+        return AsmPatterns.eliminateRepeatedByteZeroes(lines);
+    }
+
+    private static List<String> legacyRedundantXorWW(List<String> lines) {
         Pattern pXorWW = Pattern.compile("^\\s+xor\\s+w,\\s*w\\s*(?:;.*)?$", Pattern.CASE_INSENSITIVE);
         Pattern pWritesW = Pattern.compile(
             // Any op whose DESTINATION is w/wa/xwa. Two operand shapes:
@@ -2292,6 +2344,10 @@ public class AsmOptimizer {
     // nothing between reads wa/w (only writes to a or w are allowed between).
     // =========================================================================
     static List<String> eliminateDeadWaZeroBeforeExtz(List<String> lines) {
+        return AsmPatterns.eliminateZeroBeforeByteExtend(lines);
+    }
+
+    private static List<String> legacyDeadWaZeroBeforeExtz(List<String> lines) {
         Pattern pLdWa0  = Pattern.compile("^\\s+ld\\s+wa,\\s*0\\s*(?:;.*)?$", Pattern.CASE_INSENSITIVE);
         Pattern pExtzWa = Pattern.compile("^\\s+extz\\s+(?:wa|xwa)\\s*(?:;.*)?$", Pattern.CASE_INSENSITIVE);
         // Reads wa or w (not a write to them): any instruction that uses wa/w as a SOURCE
@@ -2369,7 +2425,10 @@ public class AsmOptimizer {
                 upperZero = imm.isPresent() && ((imm.getAsLong() & 0xFFFFFFFFL) <= 0xFFFFL);
                 continue;
             }
-            if (pWriteXwa.matcher(t).matches() || pShiftXwa.matcher(t).matches()) upperZero = false;
+            if (pWriteXwa.matcher(t).matches() || pShiftXwa.matcher(t).matches()
+                    || !lc.matches("(?:ld|lda|cp|and|or|xor|add|sub|extz|exts|sla|srl|sra)\\s+.*")
+                    || lc.matches(".*\\b(?:rfp|sr|xwa[0-3]|[rq]\\w*[0-3])\\b.*")
+                    || lc.matches(".*\\(xwa[+-]\\).*")) upperZero = false;
         }
         return before;
     }
@@ -2500,22 +2559,27 @@ public class AsmOptimizer {
     //     in the block are NOT affected — those stores remain in place.)
     // =========================================================================
     static List<String> fuseZeroExtendedByteLoads(List<String> lines) {
-        Pattern byteLoad = Pattern.compile("^(\\s*)ld\\s+a,\\s*(\\(.*\\))\\s*(;.*)?$",
+        Pattern byteLoad = Pattern.compile("^(\\s*)ld\\s+([acel]),\\s*(\\(.*\\))\\s*(;.*)?$",
                 Pattern.CASE_INSENSITIVE);
-        Pattern accumulatorAddress = Pattern.compile(
-                "(?i)(?<![\\w.$])(?:xwa[0-3]?|wa|w|a|[rq](?:wa|w|a)[0-9]*)(?![\\w.$])");
         List<String> out = new ArrayList<>(lines);
         for (int i = 0; i + 2 < out.size(); i++) {
             Matcher load = byteLoad.matcher(out.get(i));
-            if (!load.matches() || !directLoadSource(load.group(2), 8)
-                    || accumulatorAddress.matcher(load.group(2)).find()) continue;
+            if (!load.matches()) continue;
+            String pair = switch (load.group(2).toLowerCase(Locale.ROOT)) {
+                case "a" -> "wa"; case "c" -> "bc"; case "e" -> "de"; default -> "hl";
+            };
+            String wideRegister = "x" + pair;
+            String memory = load.group(3);
+            Pattern accumulatorAddress = Pattern.compile(
+                "(?i)(?<![\\w.$])(?:x" + pair + "[0-3]?|" + pair + "|[" + pair + "]|[rq](?:" + pair + "|[" + pair + "])[0-9]*)(?![\\w.$])");
+            if (!directLoadSource(memory, 8) || accumulatorAddress.matcher(memory).find()) continue;
             int word = i + 1;
             while (word < out.size() && out.get(word).split(";", 2)[0].isBlank()) word++;
             int wide = word + 1;
             while (wide < out.size() && out.get(wide).split(";", 2)[0].isBlank()) wide++;
             if (wide >= out.size()
-                    || !out.get(word).split(";", 2)[0].strip().matches("(?i)extz\\s+wa")
-                    || !out.get(wide).split(";", 2)[0].strip().matches("(?i)extz\\s+xwa")) continue;
+                    || !out.get(word).split(";", 2)[0].strip().matches("(?i)extz\\s+" + pair)
+                    || !out.get(wide).split(";", 2)[0].strip().matches("(?i)extz\\s+" + wideRegister)) continue;
             // Clearing first is flag-neutral and leaves the effective address
             // unchanged. Keep the byte load and all comments verbatim.
             for (int index : new int[]{wide, word}) {
@@ -2523,7 +2587,7 @@ public class AsmOptimizer {
                 if (comment < 0) out.remove(index);
                 else out.set(index, load.group(1) + out.get(index).substring(comment));
             }
-            out.add(i, load.group(1) + "ld xwa, 0");
+            out.add(i, load.group(1) + "ld " + wideRegister + ", 0");
             i++;
         }
         return out;
@@ -2533,9 +2597,9 @@ public class AsmOptimizer {
     // index through XWA. Only numeric bases and disjoint ordinary registers.
     static List<String> foldSavedByteAddress(List<String> lines) {
         List<String> out = new ArrayList<>(lines);
-        Pattern save = Pattern.compile("ld (ix|iy|iz), wa");
-        Pattern index = Pattern.compile("ld xwa, (xbc|xde)");
-        Pattern base = Pattern.compile("ld xhl, (\\S+)");
+        Pattern save = Pattern.compile("ld (bc|de|hl|ix|iy|iz), wa");
+        Pattern index = Pattern.compile("ld xwa, (x(?:bc|de|hl|ix|iy|iz))");
+        Pattern base = Pattern.compile("ld (x(?:bc|de|hl|ix|iy|iz)), (\\S+)");
         Pattern label = Pattern.compile("^[.\\w].*:.*$");
         for (int i = 0; i + 5 < out.size(); i++) {
             List<String> core = new ArrayList<>();
@@ -2543,8 +2607,11 @@ public class AsmOptimizer {
             Matcher saved = save.matcher(core.get(0)), indexed = index.matcher(core.get(1)),
                     based = base.matcher(core.get(2));
             if (!saved.matches() || !indexed.matches() || !based.matches()
-                    || parseAsmImmediate(based.group(1)).isEmpty()
-                    || !core.get(3).equals("add xhl, xwa")
+                    || parseAsmImmediate(based.group(2)).isEmpty()
+                    || AsmPatterns.mentions(indexed.group(1), saved.group(1))
+                    || AsmPatterns.mentions(based.group(1), saved.group(1))
+                    || !AsmPatterns.disjoint(based.group(1), indexed.group(1))
+                    || !core.get(3).equals("add " + based.group(1) + ", xwa")
                     || !core.get(4).equals("ld wa, " + saved.group(1))
                     || !core.get(5).matches("and wa, (?:0ffh|255|0x0*ff)")
                     || !loadTemporaryDeadAfter(out, i + 5, "xwa", 0xffff0000)
@@ -2553,10 +2620,10 @@ public class AsmOptimizer {
             // Keep comments at their original positions; no label or intervening
             // instruction is accepted by the six-line matcher.
             String[] replacement = savedDead
-                    ? new String[]{core.get(5), "ld xhl, " + based.group(1),
-                        "add xhl, " + indexed.group(1), null, null, null}
-                    : new String[]{core.get(0), core.get(5), "ld xhl, " + based.group(1),
-                        "add xhl, " + indexed.group(1), null, null};
+                    ? new String[]{core.get(5), "ld " + based.group(1) + ", " + based.group(2),
+                        "add " + based.group(1) + ", " + indexed.group(1), null, null, null}
+                    : new String[]{core.get(0), core.get(5), "ld " + based.group(1) + ", " + based.group(2),
+                        "add " + based.group(1) + ", " + indexed.group(1), null, null};
             List<String> rewritten = new ArrayList<>();
             for (int j = 0; j < 6; j++) {
                 String raw = out.get(i + j);
@@ -2671,14 +2738,27 @@ public class AsmOptimizer {
         return false;
     }
 
+    static List<String> eliminateUnreadPrivateStores(List<String> lines) {
+        return AsmPatterns.eliminateUnreadPrivateStores(lines);
+    }
+
     static List<String> foldShiftedWordSubtract(List<String> lines) {
         List<String> out = new ArrayList<>(lines);
+        Pattern shift = Pattern.compile("sla\\s+16,\\s*(x(?:wa|bc|de|hl|ix|iy|iz))");
         for (int i = 0; i + 1 < out.size(); i++) {
-            if (!out.get(i).strip().equals("sla 16, xwa")
-                    || !out.get(i + 1).strip().equals("add xwa, 0fffd0000h")
+            Matcher shifted = shift.matcher(out.get(i).split(";", 2)[0].strip().toLowerCase(Locale.ROOT));
+            AsmPatterns.Instruction arithmetic = AsmPatterns.parse(out.get(i + 1));
+            OptionalLong immediate = parseAsmImmediate(arithmetic.right());
+            if (!shifted.matches() || !arithmetic.op().matches("add|sub")
+                    || !arithmetic.left().equals(shifted.group(1)) || immediate.isEmpty()
                     || !shiftedSubtractFlagsDead(out, i + 2)) continue;
-            out.set(i, "\tdec 3, wa");
-            out.set(i + 1, "\tsla 16, xwa");
+            long delta = (arithmetic.op().equals("sub") ? -immediate.getAsLong() : immediate.getAsLong()) & 0xffffffffL;
+            if ((delta & 0xffff) != 0) continue;
+            int amount = (short) (delta >>> 16);
+            if (amount == 0 || Math.abs(amount) > 8) continue;
+            String wide = shifted.group(1), narrow = wide.substring(1);
+            out.set(i, AsmPatterns.emit(out.get(i), (amount < 0 ? "dec " : "inc ") + Math.abs(amount) + ", " + narrow));
+            out.set(i + 1, AsmPatterns.emit(out.get(i + 1), "sla 16, " + wide));
         }
         return out;
     }
@@ -4141,6 +4221,10 @@ public class AsmOptimizer {
     //   - Any label (function or BB) resets all tracking
     // =========================================================================
     static List<String> eliminateRedundantRegLoads(List<String> lines) {
+        return AsmPatterns.eliminateRedundantLoads(lines);
+    }
+
+    private static List<String> legacyRedundantRegLoads(List<String> lines) {
         // lda xreg, LABEL
         Pattern pLda    = Pattern.compile("^\\s*lda\\s+(x\\w+),\\s*([_.]\\S+)\\s*$");
         // ld xreg, LABEL  (symbol address; not a numeric)
@@ -4426,10 +4510,16 @@ public class AsmOptimizer {
         Pattern access = Pattern.compile("\\(xsp\\+(\\d+)\\)");
         Pattern scratch = Pattern.compile("(?<![\\w])(?:xhl|hl|h|l)(?![\\w])");
         Pattern register = Pattern.compile("x(?:wa|bc|de|hl|ix|iy|iz)[12]?");
-        for (int join = 0; join + 7 < code.size(); join++) {
+        for (int join = 0; join + 1 < code.size(); join++) {
             if (!code.get(join).matches("^\\.[\\w.$]+:$")) continue;
             boolean safe = true;
-            for (int step = 1; step <= 6; step++) {
+            int reloadAt = join + 1;
+            while (reloadAt + 2 < code.size()
+                    && code.get(reloadAt).matches("ld xwa, x(?:wa|bc|de|hl|ix|iy|iz)[12]?")
+                    && code.get(reloadAt + 1).matches("add xwa, x(?:wa|bc|de|hl|ix|iy|iz)[12]?")
+                    && code.get(reloadAt + 2).matches("ld (?:x(?:wa|bc|de|hl|ix|iy|iz)[12]?|\\(xsp\\+\\d+\\)), xwa")) reloadAt += 3;
+            if (reloadAt >= code.size()) continue;
+            for (int step = 1; join + step < reloadAt; step++) {
                 String instruction = code.get(join + step);
                 String expected = switch ((step - 1) % 3) {
                     case 0 -> "ld xwa, ";
@@ -4442,7 +4532,7 @@ public class AsmOptimizer {
                         || !register.matcher(instruction.substring(expected.length())).matches()) safe = false;
                 if (scratch.matcher(instruction).find()) safe = false;
             }
-            Matcher reload = load.matcher(code.get(join + 7));
+            Matcher reload = load.matcher(code.get(reloadAt));
             if (!safe || !reload.matches()) continue;
             int offset = Integer.parseInt(reload.group(1));
             int begin = join;
@@ -4489,7 +4579,7 @@ public class AsmOptimizer {
                     int other = Integer.parseInt(stack.group(1));
                     if (other < offset + 4 && other + 4 > offset) {
                         if (instruction.equals(store)) stores.add(index);
-                        else if (index != join + 7) safe = false;
+                        else if (index != reloadAt) safe = false;
                     }
                 }
                 if (instruction.contains(target) && index != join) {
@@ -4500,8 +4590,8 @@ public class AsmOptimizer {
                 if (instruction.matches("(?:jp|jr|jrl|djnz)\\s+.*")
                         && !instruction.matches("(?:jr|jrl)\\s+(?:\\w+,\\s*)?\\.[\\w.$]+")) safe = false;
             }
-            if (!safe || offset > frameSize - 4 || frameEnd <= join + 7 || stores.size() != 3
-                    || !code.get(join - 1).equals(store)) continue;
+            if (!safe || offset > frameSize - 4 || frameEnd <= reloadAt || stores.isEmpty()
+                    || join == 0 || !code.get(join - 1).equals(store)) continue;
             predecessors.add(join - 1);
             if (!predecessors.equals(new HashSet<>(stores))) continue;
             for (int index : stores) {
@@ -4509,10 +4599,10 @@ public class AsmOptimizer {
                 if (index + 1 != join && !(code.get(index + 1).equals("jr " + target)
                         || code.get(index + 1).equals("jrl " + target))) safe = false;
             }
-            if (!safe || !scratchDeadOnAllPaths(code, join + 8, end, labels, scratch)) continue;
+            if (!safe || !scratchDeadOnAllPaths(code, reloadAt + 1, end, labels, scratch)) continue;
             List<String> result = new ArrayList<>(lines);
             for (int index : stores) result.set(positions.get(index), "\tld xhl, xwa");
-            result.set(positions.get(join + 7), "\tld xwa, xhl");
+            result.set(positions.get(reloadAt), "\tld xwa, xhl");
             return result;
         }
         return lines;
@@ -4627,12 +4717,19 @@ public class AsmOptimizer {
         Pattern register = Pattern.compile("(?:x(?:bc|de|ix|iy|iz)[12]?|x(?:wa|hl)[12])");
         Pattern destination = Pattern.compile("(?:" + register.pattern() + "|\\(xsp\\+\\d+\\))");
         Pattern scratch = Pattern.compile("(?<![\\w])(?:xhl|hl|h|l)(?![\\w])");
-        for (int join = 1; join + 7 < code.size(); join++) {
+        for (int join = 1; join + 1 < code.size(); join++) {
             if (!code.get(join).matches("\\.[\\w.$]+:")
-                    || !code.get(join - 1).equals("ld xhl, xwa")
-                    || !code.get(join + 7).equals("ld xwa, xhl")) continue;
+                    || !code.get(join - 1).equals("ld xhl, xwa")) continue;
+            int reloadAt = join + 1;
+            while (reloadAt + 2 < code.size()
+                    && code.get(reloadAt).startsWith("ld xwa, ")
+                    && register.matcher(code.get(reloadAt).substring(8)).matches()
+                    && code.get(reloadAt + 1).startsWith("add xwa, ")
+                    && register.matcher(code.get(reloadAt + 1).substring(9)).matches()
+                    && code.get(reloadAt + 2).matches("ld .+, xwa")) reloadAt += 3;
+            if (reloadAt == join + 1 || reloadAt >= code.size() || !code.get(reloadAt).equals("ld xwa, xhl")) continue;
             boolean safe = true;
-            for (int step = 1; step <= 6; step++) {
+            for (int step = 1; join + step < reloadAt; step++) {
                 String instruction = code.get(join + step);
                 String prefix = step % 3 == 1 ? "ld xwa, " : "add xwa, ";
                 if (step % 3 == 0) {
@@ -4646,7 +4743,7 @@ public class AsmOptimizer {
             int begin = join;
             while (begin >= 0 && !function.matcher(code.get(begin)).matches()) begin--;
             if (begin < 0) continue;
-            int end = join + 8;
+            int end = reloadAt + 1;
             while (end < code.size() && !function.matcher(code.get(end)).matches()) end++;
             String target = code.get(join).substring(0, code.get(join).length() - 1);
             List<Integer> copies = new ArrayList<>();
@@ -4663,15 +4760,15 @@ public class AsmOptimizer {
                 if (instruction.matches("(?:jp|jr|jrl|djnz)\\s+.*")
                         && !instruction.matches("(?:jr|jrl)\\s+(?:\\w+,\\s*)?\\.[\\w.$]+")) safe = false;
             }
-            if (!safe || copies.size() != 3 || new HashSet<>(copies).size() != 3
-                    || !scratchDeadOnAllPaths(code, join + 8, end, labels, scratch)) continue;
+            if (!safe || new HashSet<>(copies).size() != copies.size()
+                    || !scratchDeadOnAllPaths(code, reloadAt + 1, end, labels, scratch)) continue;
             List<String> result = new ArrayList<>(lines);
-            for (int step = 1; step <= 6; step++) {
+            for (int step = 1; join + step < reloadAt; step++) {
                 result.set(positions.get(join + step), "\t" + code.get(join + step).replaceAll("\\bxwa\\b", "xhl"));
             }
             Set<Integer> removed = new HashSet<>();
             for (int copy : copies) removed.add(positions.get(copy));
-            removed.add(positions.get(join + 7));
+            removed.add(positions.get(reloadAt));
             List<String> filtered = new ArrayList<>();
             for (int index = 0; index < result.size(); index++) {
                 if (!removed.contains(index)) filtered.add(result.get(index));
@@ -4769,6 +4866,11 @@ public class AsmOptimizer {
     }
 
     static List<String> foldXhlAccumulatorRoundtrip(List<String> lines) {
+        return AsmPatterns.foldAluRoundtrip(lines, false);
+    }
+
+    // Historical implementation retained for comparison; not dispatched.
+    private static List<String> legacyXhlAccumulatorRoundtrip(List<String> lines) {
         Pattern pLdXhlXwa = Pattern.compile("^(\\s+)ld\\s+xhl,\\s*xwa\\s*(?:;.*)?$");
         Pattern pAluXhl   = Pattern.compile("^\\s+(add|sub|adc|sbc|and|or|xor)\\s+xhl,\\s*(\\(.*\\))\\s*(?:;.*)?$");
         Pattern pLdXwaXhl = Pattern.compile("^\\s+ld\\s+xwa,\\s*xhl\\s*(?:;.*)?$");
@@ -4827,11 +4929,11 @@ public class AsmOptimizer {
     static List<String> eliminateRegisterRoundtrip(List<String> lines) {
         // Matches:  ld xDeN, xwa  (bank/index reg on the left, xwa on the right)
         Pattern pSaveXwa = Pattern.compile(
-            "^(\\s+)ld\\s+(x(?:de|bc|hl|wa|iz|iy|ix)[0-9]?),\\s*xwa\\s*(?:;.*)?$",
+            "^(\\s+)ld\\s+(\\w+),\\s*(\\w+)\\s*(?:;.*)?$",
             Pattern.CASE_INSENSITIVE);
         // Matches:  ld xwa, xDeN  (xwa on the left, same bank/index reg on the right)
         Pattern pReloadXwa = Pattern.compile(
-            "^\\s+ld\\s+xwa,\\s*(x(?:de|bc|hl|wa|iz|iy|ix)[0-9]?)\\s*(?:;.*)?$",
+            "^\\s+ld\\s+(\\w+),\\s*(\\w+)\\s*(?:;.*)?$",
             Pattern.CASE_INSENSITIVE);
 
         List<String> out = new ArrayList<>(lines);
@@ -4840,6 +4942,8 @@ public class AsmOptimizer {
             Matcher mSave = pSaveXwa.matcher(out.get(i));
             if (!mSave.matches()) continue;
             String reg = mSave.group(2).toLowerCase(Locale.ROOT);  // e.g. "xde1"
+            String source = mSave.group(3).toLowerCase(Locale.ROOT);
+            if (!AsmPatterns.disjoint(reg, source)) continue;
             // Find the very next non-blank/non-comment line
             int j = i + 1;
             while (j < out.size()) {
@@ -4852,7 +4956,7 @@ public class AsmOptimizer {
             // The very next instruction must be the reload ld xwa, same-reg
             Matcher mReload = pReloadXwa.matcher(out.get(j));
             if (!mReload.matches()) continue;
-            if (!mReload.group(1).equalsIgnoreCase(reg)) continue;
+            if (!mReload.group(1).equalsIgnoreCase(source) || !mReload.group(2).equalsIgnoreCase(reg)) continue;
             // Safe: save immediately followed by reload — xwa is unchanged, drop reload
             out.set(j, null);
         }
@@ -4881,6 +4985,10 @@ public class AsmOptimizer {
     // involves xhl.
     // =========================================================================
     static List<String> foldXhlLoadAddRoundtrip(List<String> lines) {
+        return AsmPatterns.foldAluRoundtrip(lines, true);
+    }
+
+    private static List<String> legacyXhlLoadAddRoundtrip(List<String> lines) {
         Pattern pSaveXhl   = Pattern.compile("^(\\s+)ld\\s+xhl,\\s*xwa\\s*(?:;.*)?$",
                                               Pattern.CASE_INSENSITIVE);
         Pattern pLdXwaMem  = Pattern.compile("^\\s+ld\\s+xwa,\\s*(\\(xsp\\+[^)]+\\))\\s*(?:;.*)?$",
@@ -4940,6 +5048,10 @@ public class AsmOptimizer {
     // separate CFG-aware dead-store pass.
     // =========================================================================
     static List<String> foldSpillReloadAdd(List<String> lines) {
+        return AsmPatterns.foldSpillAlu(lines);
+    }
+
+    private static List<String> legacySpillReloadAdd(List<String> lines) {
         // ld (xsp+T), xwa
         Pattern pSpill = Pattern.compile(
             "^(\\s+)ld\\s+(\\(xsp\\+(\\d+)\\)),\\s*xwa\\s*(?:;.*)?$",
@@ -4997,6 +5109,10 @@ public class AsmOptimizer {
     // Requires xhl to be overwritten before any later use.
     // =========================================================================
     static List<String> foldXhlImmAddToMem(List<String> lines) {
+        return AsmPatterns.foldImmediateAluStore(lines);
+    }
+
+    private static List<String> legacyXhlImmAddToMem(List<String> lines) {
         // ld xhl, IMM  (hex or decimal immediate, no register or memory operand)
         Pattern pLdXhlImm  = Pattern.compile(
             "^(\\s+)ld\\s+xhl,\\s*(0[0-9a-fA-F]*h|[0-9]+)\\s*(?:;.*)?$",

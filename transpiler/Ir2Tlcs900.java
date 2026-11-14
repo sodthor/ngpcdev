@@ -472,7 +472,9 @@ public class Ir2Tlcs900 {
 
     /** Field byte offsets and total size for a struct, under target alignment rules. */
 
-    record StructLayout(int[] fieldOffsets, int size) {}
+    record StructLayout(int[] fieldOffsets, int size, int alignment) {
+        StructLayout(int[] fieldOffsets, int size) { this(fieldOffsets, size, 4); }
+    }
 
     /**
      * Compute a struct's field offsets from its IR field-type list.
@@ -483,13 +485,26 @@ public class Ir2Tlcs900 {
      * struct layout; #pragma pack(1) structs are not modeled.
      */
     static StructLayout computeStructLayout(String fieldTypesStr) {
+        return computeStructLayout(fieldTypesStr, null);
+    }
+
+    static int irTypeAlignment(String type, Map<String, StructLayout> layouts) {
+        Matcher array = Pattern.compile("\\[\\d+\\s+x\\s+(.+)\\]", Pattern.DOTALL).matcher(type.trim());
+        if (array.matches()) return irTypeAlignment(array.group(1), layouts);
+        Matcher named = Pattern.compile("%struct\\.(\\w+)").matcher(type.trim());
+        if (named.matches() && layouts != null && layouts.containsKey(named.group(1)))
+            return layouts.get(named.group(1)).alignment();
+        return Math.min(Math.max(irTypeBytes(type, layouts), 1), 4);
+    }
+
+    static StructLayout computeStructLayout(String fieldTypesStr, Map<String, StructLayout> layouts) {
         List<String> fields = splitTopLevel(fieldTypesStr);
         int[] offsets = new int[fields.size()];
         int off = 0, maxAlign = 1;
         for (int i = 0; i < fields.size(); i++) {
             String ft = fields.get(i).trim();
-            int sz    = irTypeBytes(ft);
-            int align = Math.min(Math.max(sz, 1), 4); // 1/2/4-byte natural alignment
+            int sz    = irTypeBytes(ft, layouts);
+            int align = irTypeAlignment(ft, layouts);
             if (align > maxAlign) maxAlign = align;
             if (off % align != 0) off += align - (off % align);
             offsets[i] = off;
@@ -497,19 +512,41 @@ public class Ir2Tlcs900 {
         }
 
         if (maxAlign > 1 && off % maxAlign != 0) off += maxAlign - (off % maxAlign);
-        return new StructLayout(offsets, off);
+        return new StructLayout(offsets, off, maxAlign);
     }
 
     static ParseResult parseIR(String text) {
         ParseResult pr = new ParseResult();
         String[] lines = text.split("\r?\n");
+        // Resolve nested named types before globals/functions, independent of
+        // declaration order. An aggregate's alignment is not its total size.
+        Map<String, String> pendingTypes = new LinkedHashMap<>();
+        Pattern structType = Pattern.compile("%struct\\.(\\w+)\\s*=\\s*type\\s+\\{(.*)\\}");
+        for (String raw : lines) {
+            Matcher definition = structType.matcher(raw.strip());
+            if (definition.matches()) pendingTypes.put(definition.group(1), definition.group(2));
+        }
+        while (!pendingTypes.isEmpty()) {
+            int before = pendingTypes.size();
+            for (String name : new ArrayList<>(pendingTypes.keySet())) {
+                String fields = pendingTypes.get(name);
+                Matcher dependency = Pattern.compile("%struct\\.(\\w+)").matcher(fields);
+                boolean ready = true;
+                while (dependency.find()) if (!pr.structLayouts.containsKey(dependency.group(1))) ready = false;
+                if (ready) {
+                    pr.structLayouts.put(name, computeStructLayout(fields, pr.structLayouts));
+                    pendingTypes.remove(name);
+                }
+            }
+            if (pendingTypes.size() == before)
+                throw new IllegalArgumentException("Unresolved by-value struct types: " + pendingTypes.keySet());
+        }
         int i = 0;
         while (i < lines.length) {
             String line = lines[i].strip();
             // Struct type def
             Matcher mStruct = Pattern.compile("%struct\\.(\\w+)\\s*=\\s*type\\s+\\{(.*)\\}").matcher(line);
             if (mStruct.matches()) {
-                pr.structLayouts.put(mStruct.group(1), computeStructLayout(mStruct.group(2)));
                 i++; continue;
             }
 
@@ -964,10 +1001,15 @@ public class Ir2Tlcs900 {
         return -1;
     }
 
-    static int findPackedStructEnd(String s, int start) {        if (start + 1 >= s.length() || s.charAt(start) != '<' || s.charAt(start + 1) != '{') return -1;
+    static int findPackedStructEnd(String s, int start) {
+        if (start + 1 >= s.length() || s.charAt(start) != '<' || s.charAt(start + 1) != '{') return -1;
         int depth = 0;
+        boolean quoted = false;
         for (int i = start + 1; i < s.length(); i++) {
             char c = s.charAt(i);
+            if (quoted && c == '\\') { i++; continue; }
+            if (c == '"') { quoted = !quoted; continue; }
+            if (quoted) continue;
             if (c == '{' || c == '[') depth++;
             else if (c == '}') {
                 depth--;
@@ -1391,6 +1433,67 @@ public class Ir2Tlcs900 {
         // unsupported or unprofitable region is a graceful decline (the caller retries
         // with the default backend); explicitly named functions stay fatal on failure.
         boolean autoRegisterAllocation;
+        Set<String> rawAsmCallees = Set.of();
+        Map<String, Set<String>> rawAsmClobbers = Map.of();
+        List<String> interruptSaves = ISR_REGS;
+
+        static final List<String> RAW_CALLEE_SAVES = List.of("xbc", "xde", "xix", "xiy", "xiz",
+            "xbc1", "xde1", "xhl1", "xwa1", "xbc2", "xde2", "xhl2", "xwa2");
+
+        /** User-selected contract for known project BIOS wrappers. This is NOT
+         * a proof that the wrapper assembly itself preserves its registers.
+         * Keep disabled globally; project builds opt in with a JVM property. */
+        static boolean trustedBiosWrapper(String name, List<String> assembly) {
+            if (!Set.of("SysShutdown", "SysSetSystemFont", "CpuSpeed", "flash").contains(name)) return false;
+            String code = assembly.stream().map(line -> line.split(";", 2)[0].trim().toLowerCase(Locale.ROOT)
+                .replaceAll("\\s+", " ")).collect(Collectors.joining("\n"));
+            if (name.equals("flash")) return code.contains("swi 1") && code.contains("vect_flashwrite")
+                && code.contains("vect_flashers");
+            return code.contains("ldf 3") && code.contains("0fffe00h")
+                && code.contains("ld xix,(xix+w)") && code.contains("call xix");
+        }
+
+        /** Over-approximate raw register effects. Reads count as clobbers too;
+         * unknown effects/bank changes return null, preserving the old fallback. */
+        static Set<String> summarizeRawClobbers(List<String> assembly) {
+            Set<String> touched = new LinkedHashSet<>();
+            List<String> all = new ArrayList<>(RAW_CALLEE_SAVES);
+            all.addAll(List.of("xwa", "xhl"));
+            Set<String> labels = new HashSet<>();
+            for (String raw : assembly) {
+                String line = raw.split(";", 2)[0].trim().toLowerCase(Locale.ROOT);
+                if (line.endsWith(":")) labels.add(line.substring(0, line.length() - 1));
+            }
+            for (String raw : assembly) {
+                String core = raw.split(";", 2)[0].trim().toLowerCase(Locale.ROOT);
+                if (core.isEmpty() || core.endsWith(":")) continue;
+                String[] words = core.split("\\s+", 2);
+                String op = words[0];
+                if (op.equals("db")) {
+                    // Existing movie raster waits: BIT 7,(8009h); JR Z/NZ,-9.
+                    String bytes = core.replaceAll("\\s+", "");
+                    if (!Set.of("db0c1h,09h,80h,23h", "db0cbh,0cch,07h", "db6eh,0f7h", "db66h,0f7h").contains(bytes)) return null;
+                    touched.add("xbc");
+                    continue;
+                }
+                if (core.contains("equ") || op.equals("ret") || op.equals("reti")) continue;
+                if (!op.matches("ld[bwl]?|lda|push|pop|add|sub|and[bwl]?|or[bwl]?|xor[bwl]?|cp[bwl]?|bit|inc|dec|incw|decw|sla|srl|sra|extz|exts|djnz|jr|jrl|jp|nop|ldir[bw]?")) return null;
+                if (core.matches(".*\\b(?:sr|rfp|f)\\b.*")) return null;
+                if (core.matches(".*\\b(?:x|r)(?:wa|bc|de|hl|[wabcdehl])3\\b.*")) return null;
+                if (op.matches("jr|jrl|jp|djnz")) {
+                    String target = core.substring(Math.max(core.lastIndexOf(','), core.indexOf(' ')) + 1).trim();
+                    if (!labels.contains(target)) return null; // indirect/nonlocal transfer
+                }
+                if (op.startsWith("ldir")) touched.addAll(List.of("xbc", "xde", "xhl"));
+                for (String reg : all) {
+                    Set<String> lanes = AsmPatterns.registerBytes(reg);
+                    if (!Collections.disjoint(lanes, AsmPatterns.operandBytes(core))) touched.add(reg);
+                    String base = reg.substring(1);
+                    if (reg.matches("x(?:wa|bc|de|hl)") && core.matches(".*\\bq" + base + "\\b.*")) touched.add(reg);
+                }
+            }
+            return Set.copyOf(touched);
+        }
         // Survey-only sink: when non-null, the plan()/profitability() probe records a
         // {function, outcome, score, detail} row here instead of only logging. Set by
         // the --register-allocation-survey driver; null in normal builds.
@@ -2905,6 +3008,12 @@ public class Ir2Tlcs900 {
             // profitable register candidates instead of forced through stack slots.
             Map<String, Integer> candidates = new LinkedHashMap<>(accessCounts);
             candidates.entrySet().removeIf(e -> e.getValue() < 2);
+            // An addressable alloca can be read or written through a passed
+            // pointer. Callee-save registers preserve registers, not coherence
+            // with that memory cell; do not promote escaped storage.
+            List<BasicBlock> bbs = parseBody();
+            for (String name : originalAllocaNames)
+                if (allocaEscapes(name, bbs)) candidates.remove(name);
             // All phi participants are now eligible for promotion. The parallel-copy
             // sequencer (emitParallelPhiCopies) uses a scratch stack slot to break any
             // register-to-register cycles on phi edges, so no pre-filter is needed.
@@ -3002,7 +3111,7 @@ public class Ir2Tlcs900 {
         private void coalesceBankChainsImpl(List<BasicBlock> bbs, List<Integer> freeBanks) {
             Set<String> phis = phiParticipantNames();
             Set<String> escaping = new LinkedHashSet<>();
-            for (String a : allocaSlots) if (allocaEscapes(a, bbs)) escaping.add(a);
+            for (String a : originalAllocaNames) if (allocaEscapes(a, bbs)) escaping.add(a);
 
             List<String> cands = new ArrayList<>();
             for (Map.Entry<String, Integer> e : accessCounts.entrySet()) {
@@ -3780,7 +3889,7 @@ public class Ir2Tlcs900 {
             // For interrupt handlers: 6 registers (xwa/xhl/xde/xbc/xix/xiy) × 4 bytes
             // are pushed before the local frame, so args are 24 bytes further up.
             Map<String, int[]> argOffsets = new LinkedHashMap<>();
-            int argSp = 4 + (isrHasBody ? ISR_REGS.size() * 4 : 0); // past far return address (+ saved regs)
+            int argSp = 4 + (isrHasBody ? interruptSaves.size() * 4 : 0); // past far return address (+ saved regs)
             for (Param p : params) {
                 if (p.name() != null && !p.name().isBlank()) {
                     argOffsets.put(p.name(), new int[]{argSp, irTypeBits(p.type())});
@@ -3814,7 +3923,7 @@ public class Ir2Tlcs900 {
             }
 
             if (isrHasBody) {
-                for (String reg : ISR_REGS) out.add("\tpush " + reg);
+                for (String reg : interruptSaves) out.add("\tpush " + reg);
             }
 
             // Save only the portion of each callee-saved register this function can
@@ -3951,7 +4060,7 @@ public class Ir2Tlcs900 {
                 // frameSize grew from zero after prePass â€" insert the line now.
                 // Find insertion point: after the label (and after any ISR/reg-save pushes).
                 int insertAt = out.indexOf("_" + func.name() + ":") + 1;
-                if (isrHasBody) insertAt += ISR_REGS.size();
+                if (isrHasBody) insertAt += interruptSaves.size();
                 if (!isEntryPoint) {
                     insertAt += (useXBC ? 1 : 0) + (useXDE ? 1 : 0) + (useXIX ? 1 : 0) + (useXIY ? 1 : 0) + (useXIZ ? 1 : 0);
                     for (int i = 0; i < BANK_REG_KEYS.length; i++) if (useBank[i]) insertAt++;
@@ -4691,7 +4800,7 @@ public class Ir2Tlcs900 {
                 if (frameSize > 0) emit("add xsp, " + frameSize + "\t; free frame");
                 if (isInterrupt) {
                     if (isrHasBody()) {
-                        for (int ri = ISR_REGS.size() - 1; ri >= 0; ri--) emit("pop " + ISR_REGS.get(ri));
+                        for (int ri = interruptSaves.size() - 1; ri >= 0; ri--) emit("pop " + interruptSaves.get(ri));
                     }
 
                     emit("reti");
@@ -4708,7 +4817,7 @@ public class Ir2Tlcs900 {
                 if (frameSize > 0) emit("add xsp, " + frameSize + "\t; free frame");
                 if (isInterrupt) {
                     if (isrHasBody()) {
-                        for (int ri = ISR_REGS.size() - 1; ri >= 0; ri--) emit("pop " + ISR_REGS.get(ri));
+                        for (int ri = interruptSaves.size() - 1; ri >= 0; ri--) emit("pop " + interruptSaves.get(ri));
                     }
 
                     emit("reti");
@@ -5141,6 +5250,13 @@ public class Ir2Tlcs900 {
             // so the consuming load/store can use (xhl+0) without a stack round-trip.
             if (xhlOnly.contains(dst) && irType.equals("ptr")) {
                 loadToXHL(srcStr, irType, argOffsets);
+                // srcStr denotes the cell containing the pointer, not the
+                // loaded pointer itself. Resolve any deferred indexed address.
+                if (srcStr.startsWith("%") && srcStr.substring(1).equals(xhlIndexPending)) {
+                    emit("add xhl, xwa");
+                    xhlIndexPending = null;
+                }
+                emit("ld xhl, (xhl)");
                 xhlSlotName = dst;
                 return;
             }
@@ -5226,6 +5342,22 @@ public class Ir2Tlcs900 {
                     if (bits <= 8)       { if (normalizeByte) emit("ld wa, 0"); emit("ld a, (xhl+0)"); }
                     else if (bits <= 16) emit("ld wa, (xhl+0)");
                     else                 emit("ld xwa, (xhl+0)");
+                    xhlSlotName = null;
+                    storeWAtoSlot(dst, Math.min(bits, 32));
+                    return;
+                }
+
+                // A promoted SSA pointer is an address, not a promoted scalar
+                // alloca's stored value. Dereference every ordinary register
+                // home just as the bank-register path below does. This matters
+                // especially for unrolled loads through one live palette pointer.
+                if (!allocaSlots.contains(vname) && (vname.equals(bcSlotName)
+                        || vname.equals(deSlotName) || vname.equals(ixSlotName)
+                        || vname.equals(iySlotName) || vname.equals(izSlotName))) {
+                    loadToXHL(srcStr, "ptr", argOffsets);
+                    if (bits <= 8) { if (normalizeByte) emit("ld wa, 0"); emit("ld a, (xhl+0)"); }
+                    else if (bits <= 16) emit("ld wa, (xhl+0)");
+                    else emit("ld xwa, (xhl+0)");
                     xhlSlotName = null;
                     storeWAtoSlot(dst, Math.min(bits, 32));
                     return;
@@ -5663,7 +5795,7 @@ public class Ir2Tlcs900 {
             //   <iK>, ptr getelementptr(<inner all-const gep>), i32 <idx>
             // Resolve the inner const GEP to _sym+innerOff, then add idx*sizeof(iK).
             m = Pattern.compile(
-                "(i8|i16|i32),\\s*ptr\\s+(getelementptr\\s+(?:(?:inbounds|nuw|nusw)\\s+)*\\(.*\\)),\\s*i(?:32|64)\\s+(-?\\d+|%[^,\\s]+)\\s*$")
+                "(i8|i16|i32|%struct\\.\\w+),\\s*ptr\\s+(getelementptr\\s+(?:(?:inbounds|nuw|nusw)\\s+)*\\(.*\\)),\\s*i(?:32|64)\\s+(-?\\d+|%[^,\\s]+)\\s*$")
                 .matcher(rest);
             if (m.find()) {
                 String elemTy = m.group(1);
@@ -5672,7 +5804,7 @@ public class Ir2Tlcs900 {
                 OptionalLong innerOff = constExprGepOffset(innerGep);
                 String sym = constExprGepSymbol(innerGep);
                 if (innerOff.isPresent() && !sym.isEmpty()) {
-                    int esz = irTypeBytes(elemTy);
+                    int esz = irTypeBytes(elemTy, structLayouts);
                     if (idx.startsWith("%")) {
                         loadToWA(idx, "i32", argOffsets);
                         if (esz != 1) emitMulImm(esz);
@@ -5764,13 +5896,13 @@ public class Ir2Tlcs900 {
             //   `[N x T], ptr b, i32 i0, ...` idx0 scales by size(aggType) (walking
             //   past whole [N x T] blocks), idx j>=1 scales by size(element of peeled[j-1]).
             long[] strides = new long[idxVals.size()];
-            strides[0] = irTypeBytes(aggType);
+            strides[0] = irTypeBytes(aggType, structLayouts);
             for (int j = 1; j < idxVals.size(); j++) {
                 // stride = size of the element type of the (j-1)-th peeled array,
                 // i.e. size(peeled[j]) when peeled[j] is the element type after one peel.
                 String elemTy = peeled.get(j);
                 if (elemTy == null) return false;
-                strides[j] = irTypeBytes(elemTy);
+                strides[j] = irTypeBytes(elemTy, structLayouts);
             }
 
             // Fold constant contributions; collect the (single) variable term, if any.
@@ -5915,14 +6047,14 @@ public class Ir2Tlcs900 {
             Matcher mi = Pattern.compile("i(?:32|64)\\s+(-?\\d+)").matcher(idxCsv);
             while (mi.find()) idx.add(Long.parseLong(mi.group(1)));
             if (idx.isEmpty()) return OptionalLong.empty();
-            long off = idx.get(0) * irTypeBytes(aggType);   // walk whole-aggregate blocks
+            long off = idx.get(0) * irTypeBytes(aggType, structLayouts);   // walk whole-aggregate blocks
             String t = aggType;
             for (int j = 1; j < idx.size(); j++) {
                 if (t.startsWith("[")) {
                     String[] hdr = parseArrayHeader(t + " zeroinitializer");
                     if (hdr == null) return OptionalLong.empty();
                     String elemTy = hdr[1].trim();
-                    off += idx.get(j) * irTypeBytes(elemTy);
+                    off += idx.get(j) * irTypeBytes(elemTy, structLayouts);
                     t = elemTy;
                 } else if (t.startsWith("%struct.")) {
                     String sname = t.substring("%struct.".length());
@@ -7301,6 +7433,25 @@ public class Ir2Tlcs900 {
             if (callee.startsWith("llvm.")) {
                 // Lifetime markers are no-ops with no result: drop them.
                 if (callee.startsWith("llvm.lifetime.")) return;
+                // Absolute value wraps at the signed minimum when poison=false.
+                // When poison=true that input is undefined, so wrapping is valid too.
+                Matcher mAbs = Pattern.compile("llvm\\.abs\\.i(8|16|32)").matcher(callee);
+                if (mAbs.matches() && args.size() == 2 && dst != null) {
+                    int bits = Integer.parseInt(mAbs.group(1));
+                    String reg = bits == 8 ? "a" : bits == 16 ? "wa" : "xwa";
+                    loadToWA(args.get(0).val(), args.get(0).type(), argOffsets);
+                    String done = bbPrefix + "intr_" + (intrinLabelCtr++);
+                    emit("cp " + reg + ", 0");
+                    emit("jrl GE, " + done);
+                    if (bits == 32) {
+                        // NEG only has byte/word forms on TLCS-900/H.
+                        emit("xor xwa, 0ffffffffh");
+                        emit("add xwa, 1");
+                    } else emit("neg " + reg);
+                    out.add(done + ":");
+                    storeWAtoSlot(dst, bits);
+                    return;
+                }
                 // Integer min/max: llvm.{u,s}{min,max}.iN(a, b). Lower to
                 // load a -> WA, load b -> HL, compare, keep the winner in WA.
                 Matcher mMM = Pattern.compile("llvm\\.(u|s)(min|max)\\.i(\\d+)").matcher(callee);
@@ -7435,7 +7586,20 @@ public class Ir2Tlcs900 {
                 // surface as an undefined symbol â€" intentional, so it is not silent.
             }
 
-            int pushBytes = 0;
+            // Raw assembly functions own their stack and do not implement the
+            // generated C callee-save convention. Preserve the complete ABI
+            // state in the caller, before arguments, so raw XSP+N accesses keep
+            // their entry offsets and frame-relative argument loads are rebased.
+            List<String> rawSaves = new ArrayList<>();
+            if (rawAsmCallees.contains(callee)) {
+                Set<String> effects = rawAsmClobbers.get(callee);
+                for (String reg : RAW_CALLEE_SAVES)
+                    if (effects == null || effects.contains(reg) && !(isInterrupt && interruptSaves.contains(reg)))
+                        rawSaves.add(reg);
+                for (String register : rawSaves) emit("push " + register);
+            }
+            int savedBytes = rawSaves.size() * 4;
+            int pushBytes = savedBytes;
             // Push args right-to-left (CC900 __cdecl)
             for (int i = args.size() - 1; i >= 0; i--) {
                 Arg a = args.get(i);
@@ -7472,7 +7636,8 @@ public class Ir2Tlcs900 {
             // Absolute call: `calr` is PC-relative with limited range and overflows
             // ("distance too big") in large ROMs where caller and callee are far apart.
             emit("call _" + callee);
-            if (pushBytes > 0) emit("add xsp, " + pushBytes);
+            if (pushBytes > savedBytes) emit("add xsp, " + (pushBytes - savedBytes));
+            for (int i = rawSaves.size() - 1; i >= 0; i--) emit("pop " + rawSaves.get(i));
             // Reload promoted registers clobbered by the call.
             // The stack slot was kept in sync by emitStore (bcNeedsSpillAroundCall path),
             // so we can reload from (xsp+N) now that the arg stack is cleaned up.
@@ -7823,37 +7988,24 @@ public class Ir2Tlcs900 {
          * NOT clobber WA. calr/call clobber caller-saved registers, so they do.
          */
         static boolean asmWritesWA(String t) {
-            if (t.startsWith("calr") || t.startsWith("call")) return true;
-            // Direct WA-family reads-as-destination or explicit mentions.
-            if (t.contains("xwa") || t.contains(", wa") || t.contains(", a")) return true;
-            if (t.startsWith("ld wa,") || t.startsWith("ld a,")) return true;
-            if (t.startsWith("scc ")) {
-                // scc cc, R  — only clobbers WA when R is a/wa/xwa.
-                String r = t.replaceFirst("^scc\\s+[a-z]+\\s*,\\s*", "").trim();
-                return r.equals("a") || r.equals("wa") || r.equals("xwa");
-            }
-
-            if (t.startsWith("pop ")) {
-                String r = t.substring(4).trim();
-                return r.equals("wa") || r.equals("xwa");
-            }
-
-            // Unary shift/extend forms: `extz xwa`, `exts wa`, `sla N, xwa`, ...
-            // Extract the last operand (destination register) and test it.
-            if (t.startsWith("extz") || t.startsWith("exts")
-                    || t.startsWith("sla ") || t.startsWith("srl ") || t.startsWith("sra ")
-                    || t.startsWith("add ") || t.startsWith("sub ")
-                    || t.startsWith("and ") || t.startsWith("or ") || t.startsWith("xor ")
-                    || t.startsWith("inc ") || t.startsWith("dec ") || t.startsWith("neg ")
-                    || t.startsWith("mul ") || t.startsWith("div ")
-                    || t.startsWith("adc ") || t.startsWith("sbc ")) {
-                int comma = t.lastIndexOf(',');
-                String dst = (comma >= 0 ? t.substring(comma + 1) : t.replaceFirst("^\\S+", "")).trim();
-                return dst.equals("a") || dst.equals("wa") || dst.equals("xwa")
-                    || dst.equals("w");
-            }
-
-            return false;
+            String core = t.split(";", 2)[0].strip().toLowerCase(Locale.ROOT);
+            AsmPatterns.Instruction n = AsmPatterns.parse(core);
+            if (core.isEmpty()) return false;
+            if (n.op().matches("call|calr|cal|swi|ldf|incf|decf|ex|exx")
+                    || core.matches(".*\\b(?:sr|rfp)\\b.*")) return true;
+            Set<String> wa = AsmPatterns.registerBytes("xwa");
+            // Auto-updated address registers are writes too, not ordinary
+            // source reads. Unknown addressing forms remain conservative.
+            if (core.matches(".*\\([^)]*(?:\\+\\+|--)[^)]*\\).*"))
+                if (!Collections.disjoint(AsmPatterns.operandBytes(core), wa)) return true;
+            String destination;
+            if (n.op().matches("scc|inc|dec|sla|sra|srl|rl|rr|rlc|rrc")) destination = n.right();
+            else if (n.op().matches("ld|lda|pop|add|sub|adc|sbc|and|or|xor|extz|exts|neg|cpl|daa|mul|muls|div|divs")) destination = n.left();
+            else if (n.op().matches("cp|bit|push|pushw|jr|jrl|jp|ret|reti|nop|di|ei")) return false;
+            else return true;
+            // Ordinary XWA and explicit bank zero alias; banks 1..3 do not.
+            // Reading WA as a source does not invalidate its resident SSA value.
+            return !Collections.disjoint(AsmPatterns.registerBytes(destination), wa);
         }
     }
 
@@ -7863,6 +8015,21 @@ public class Ir2Tlcs900 {
     // =========================================================================
 
     static class Translator {
+        private static void configureRawCallSaves(FuncTranslator ft, Map<String, Set<String>> summaries) {
+            ft.rawAsmClobbers = summaries;
+            if (!ft.isInterrupt || ft.isRawAsm) return;
+            Set<String> union = new LinkedHashSet<>(FuncTranslator.ISR_REGS);
+            Pattern call = Pattern.compile("@([\\w.$]+)\\(");
+            for (String line : ft.func.body()) {
+                if (!line.contains("call") || line.contains("asm")) continue;
+                Matcher target = call.matcher(line);
+                if (!target.find() || !ft.rawAsmCallees.contains(target.group(1))) continue;
+                Set<String> effects = summaries.get(target.group(1));
+                if (effects == null) continue; // unknown raw calls retain local full saves
+                for (String reg : FuncTranslator.RAW_CALLEE_SAVES) if (effects.contains(reg)) union.add(reg);
+            }
+            ft.interruptSaves = List.copyOf(union);
+        }
         final String  irText;
         final String  moduleName;
         final Set<String> experimentalRegisterFunctions = new LinkedHashSet<>();
@@ -7895,6 +8062,7 @@ public class Ir2Tlcs900 {
             if (!experimentalRegisterFunctions.isEmpty() || autoRegisterAllocation)
                 out.add("; experimental-loop-register-allocation");
             out.add("\tcpu\t93C141");
+            out.add(AsmPatterns.BANK_ZERO_ABI);
             out.add("\tmaxmode\ton");
             out.add("\tinclude\t\"stddef96.inc\"");
             out.add("\tinclude\t\"HARDWARE.INC\"");
@@ -7902,6 +8070,19 @@ public class Ir2Tlcs900 {
             out.add("");
             // Globals
             Set<String> globalNames = pr.globals.stream().map(GlobalVar::name).collect(Collectors.toSet());
+            Set<String> rawAsmCallees = pr.functions.stream().filter(FuncTranslator::computeIsRawAsm)
+                .map(IrFunction::name).collect(Collectors.toSet());
+            Map<String, Set<String>> rawAsmClobbers = new LinkedHashMap<>();
+            for (IrFunction raw : pr.functions) if (rawAsmCallees.contains(raw.name())) {
+                Map<String, String> equates = new HashMap<>(FuncTranslator.emittedEqu);
+                List<String> rawCode = new FuncTranslator(raw, globalNames, pr.structLayouts).translate();
+                Set<String> effects = Boolean.getBoolean("ngpc.trustBiosWrappers")
+                    && FuncTranslator.trustedBiosWrapper(raw.name(), rawCode)
+                    ? Set.of() : FuncTranslator.summarizeRawClobbers(rawCode);
+                FuncTranslator.emittedEqu.clear();
+                FuncTranslator.emittedEqu.putAll(equates);
+                if (effects != null) rawAsmClobbers.put(raw.name(), effects);
+            }
             emitGlobals(pr.globals, out, moduleName, pr.structLayouts);
             // Code
             out.add("; ---- code ----");
@@ -7918,6 +8099,8 @@ public class Ir2Tlcs900 {
                     // Observation-only probe: run plan()/profitability() on every
                     // function (as if auto) without using the result for codegen.
                     FuncTranslator probe = new FuncTranslator(func, globalNames, pr.structLayouts);
+                    probe.rawAsmCallees = rawAsmCallees;
+                    configureRawCallSaves(probe, rawAsmClobbers);
                     probe.experimentalRegisterAllocation = true;
                     probe.autoRegisterAllocation = true;
                     probe.surveySink = surveyRows::add;
@@ -7929,6 +8112,8 @@ public class Ir2Tlcs900 {
                 }
                 boolean explicit = experimentalRegisterFunctions.contains(func.name());
                 FuncTranslator ft = new FuncTranslator(func, globalNames, pr.structLayouts);
+                ft.rawAsmCallees = rawAsmCallees;
+                configureRawCallSaves(ft, rawAsmClobbers);
                 ft.experimentalRegisterAllocation = explicit || autoRegisterAllocation;
                 ft.autoRegisterAllocation = autoRegisterAllocation && !explicit;
                 List<String> fnOut;
@@ -7942,11 +8127,19 @@ public class Ir2Tlcs900 {
                     // failure fatal so an opt-in that cannot be honored is loud.
                     if (!ft.autoRegisterAllocation) throw decline;
                     FuncTranslator fallback = new FuncTranslator(func, globalNames, pr.structLayouts);
+                    fallback.rawAsmCallees = rawAsmCallees;
+                    configureRawCallSaves(fallback, rawAsmClobbers);
                     fnOut = fallback.translate();
                     allocated = false;
                 }
                 if (!allocated) fnOut = eliminateSpills(fnOut);
-                fnOut = trimIsrSaves(fnOut);
+                if (ft.interruptSaves.equals(FuncTranslator.ISR_REGS)) fnOut = trimIsrSaves(fnOut);
+                if (func.retType().equals("void") && !ft.isInterrupt && !ft.isRawAsm
+                        && fnOut.stream().noneMatch(line -> AsmPatterns.parse(line).op().equals("reti"))) {
+                    fnOut = new ArrayList<>(fnOut);
+                    int entry = fnOut.indexOf("_" + func.name() + ":");
+                    if (entry >= 0) fnOut.add(entry + 1, AsmPatterns.VOID_SCRATCH_ABI);
+                }
                 if (allocated)
                     out.add(AsmOptimizer.PROTECTED_BEGIN + func.name());
                 out.addAll(fnOut);
@@ -8539,39 +8732,16 @@ public class Ir2Tlcs900 {
                 "^\\s*%([\\w.]+)\\s*=\\s*load\\s+(?:volatile\\s+)?([^,\\s]+),\\s*ptr\\s+@([\\w.$]+)\\s*(?:,.*)?$");
             Pattern pStoreG = Pattern.compile("^\\s*store\\b.*,\\s*ptr\\s+@([\\w.$]+)\\s*(?:,.*)?$");
             // store through a destination pointer token: capture the pointer operand.
-            Pattern pStoreDst = Pattern.compile("^\\s*store\\b.*,\\s*ptr\\s+(\\S+?)\\s*(?:,\\s*align\\b.*)?$");
-            // A GEP definition: %p = getelementptr ... â€" capture dst and whether it is
-            // rooted at a fixed inttoptr(...) constant or another fixed pointer %q.
-            Pattern pGepDef = Pattern.compile("^\\s*%([\\w.]+)\\s*=\\s*getelementptr\\b(.*)$");
-            Pattern pGepFromPtrName = Pattern.compile("\\bptr\\s+%([\\w.]+)\\b");
+            Pattern pStoreDst = Pattern.compile("^\\s*store\\b.*$");
             Pattern pLabel  = Pattern.compile("^\\s*[\\w.$]+:\\s*(;.*)?$");
             Pattern pCall   = Pattern.compile("\\bcall\\b");
             Map<String,String> avail = new HashMap<>();   // "@g|type" -> SSA value (e.g. %11)
             Map<String,String> alias = new HashMap<>();    // redundant %load -> cached %value
             Set<Integer> deleteLines = new HashSet<>();
-            // SSA pointers provably rooted at a fixed integer address (inttoptr constant):
-            // a store through one cannot alias a linker @global on this target. Built as we
-            // scan (GEP defs precede their store uses within a block); cleared per block.
-            Set<String> fixedPtrs = new HashSet<>();
             for (int i = 0; i < body.size(); i++) {
                 String s = body.get(i);
                 String t = s.strip();
-                if (pLabel.matcher(t).matches()) { avail.clear(); fixedPtrs.clear(); continue; }
-                // Track fixed-address-derived pointers (GEP off inttoptr(...) or off another
-                // fixed pointer).
-                Matcher mgep = pGepDef.matcher(s);
-                if (mgep.matches()) {
-                    String dst = mgep.group(1), rest = mgep.group(2);
-                    boolean fixed = rest.contains("inttoptr");
-                    if (!fixed) {
-                        Matcher mp = pGepFromPtrName.matcher(rest);
-                        if (mp.find() && fixedPtrs.contains(mp.group(1))) fixed = true;
-                    }
-
-                    if (fixed) fixedPtrs.add(dst);
-                    // (a GEP defines a pointer; it does not store â€" no invalidation)
-                    continue;
-                }
+                if (pLabel.matcher(t).matches()) { avail.clear(); continue; }
 
                 Matcher ml = pLoadG.matcher(s);
                 if (ml.matches() && !t.contains("volatile")) {
@@ -8599,18 +8769,15 @@ public class Ir2Tlcs900 {
 
                 Matcher mst = pStoreDst.matcher(s);
                 if (mst.matches()) {
-                    String dstPtr = mst.group(1);
-                    // Non-aliasing to globals iff the destination is a fixed integer address
-                    // (literal inttoptr) or a pointer derived from one. Otherwise an unknown
-                    // %ptr may hit a global → clobber all cached loads.
-                    boolean nonAliasing =
-                        dstPtr.startsWith("inttoptr")
-                        || (dstPtr.startsWith("%") && fixedPtrs.contains(dstPtr.substring(1)));
-                    if (!nonAliasing) avail.clear();
+                    // An integer-derived pointer is not an alias proof: arbitrary
+                    // code may deliberately address a linker global numerically.
+                    // Also accept complete inline expressions, not just one token.
+                    avail.clear();
                     continue;
                 }
 
                 if (pCall.matcher(s).find()) { avail.clear(); continue; }
+                if (t.matches(".*\\b(?:atomicrmw|cmpxchg|fence|invoke)\\b.*")) avail.clear();
             }
 
             if (alias.isEmpty()) return;
@@ -9406,6 +9573,16 @@ public class Ir2Tlcs900 {
                         // backedge) or on another successor. Linear forward scanning
                         // cannot prove the store dead across that CFG edge. Keep it.
                         String tj = lj.trim().toLowerCase(Locale.ROOT);
+                        // A callee may read an escaped alloca, including one
+                        // whose address was formed before this store. Likewise
+                        // forming/passing a stack address defeats a linear
+                        // direct-slot-only proof of deadness.
+                        if (tj.startsWith("call ") || tj.startsWith("calr ")
+                                || tj.contains("xsp") && !tj.startsWith("ld (xsp+")
+                                    && !pLoad.matcher(lj).matches()
+                                    && !pAluMemRead.matcher(lj).matches()) {
+                            live = true; break;
+                        }
                         if (tj.startsWith("jr ") || tj.startsWith("jrl ")
                                 || tj.startsWith("jp ") || tj.startsWith("ret")
                                 || tj.startsWith("reti")) {
@@ -9528,6 +9705,7 @@ public class Ir2Tlcs900 {
                                 if (k < 0) break;
                                 String lk = cur.get(k);
                                 if (pLabel.matcher(lk).matches()) break;   // barrier
+                                if (isSlotForwardBarrier(lk, pLabel)) break;
                                 // Reload of the same slot into the same register → redundant.
                                 Matcher mLdk = pLoad.matcher(lk);
                                 if (mLdk.matches() && mLdk.group(1).equals(reg)
@@ -9577,6 +9755,7 @@ public class Ir2Tlcs900 {
                                 while (window <= 3) {
                                     k = nextSig(cur, drop, k + 1);
                                     if (k < 0 || pLabel.matcher(cur.get(k)).matches()) break;
+                                    if (isSlotForwardBarrier(cur.get(k), pLabel)) break;
                                     Matcher mLd2 = pLoad.matcher(cur.get(k));
                                     if (mLd2.matches() && mLd2.group(2).equals(off)) {
                                         // Found the reload into R2.
@@ -10023,6 +10202,10 @@ public class Ir2Tlcs900 {
     // (e.g. xhl), never the accumulator, which is why the post-consumer deadness scan is
     // required.
     static List<String> foldReloadIntoAluMemOperand(List<String> lines) {
+        return AsmOptimizer.foldReloadIntoAluMemOperand(lines);
+    }
+
+    private static List<String> legacyReloadIntoAluMemOperand(List<String> lines) {
         // Producer: ld xwa|wa , (xsp+N)   g1=accWidth reg, g2=full mem operand, g3=N
         Pattern pLoad = Pattern.compile(
             "^\\s+ld\\s+(xwa|wa),\\s*(\\(xsp\\+(\\d+)\\))\\s*(?:;.*)?$",
@@ -10551,6 +10734,10 @@ public class Ir2Tlcs900 {
 
     // =========================================================================
     static List<String> removeRedundantMaskBeforeMask(List<String> lines) {
+        return AsmPatterns.simplifyByteMaskChains(lines);
+    }
+
+    private static List<String> legacyRedundantMaskBeforeMask(List<String> lines) {
         Pattern pAndFF = Pattern.compile("^\\s+and\\s+wa,\\s*(?:0ffh|255|0x0*ff)\\s*(?:;.*)?$",
                                          Pattern.CASE_INSENSITIVE);
         Pattern pAnd   = Pattern.compile("^\\s+and\\s+(wa|xwa),\\s*([^\\s;]+)\\s*(?:;.*)?$",
@@ -10662,6 +10849,10 @@ public class Ir2Tlcs900 {
      * Labels reset knowledge.
      */
     static boolean[] computeXwaUpper16ZeroBefore(List<String> lines) {
+        return AsmOptimizer.computeXwaUpper16ZeroBefore(lines);
+    }
+
+    private static boolean[] legacyXwaUpper16ZeroBefore(List<String> lines) {
         Pattern pLabel = Pattern.compile("^[.\\w].*:.*$");
         Pattern pLdXwaImm = Pattern.compile("^ld\\s+xwa,\\s*([^\\s;]+)\\s*$",
                                             Pattern.CASE_INSENSITIVE);
@@ -10882,6 +11073,10 @@ public class Ir2Tlcs900 {
      *  Only the word push (`push wa`) is foldable: `push xwa` pushes 4 bytes and there is no
      *  short immediate form that pushes a long, so those are left untouched. */
     static List<String> foldPushImmediate(List<String> lines) {
+        return AsmOptimizer.foldPushImmediate(lines);
+    }
+
+    private static List<String> legacyPushImmediate(List<String> lines) {
         Pattern pLdWa = Pattern.compile(
             "^\\s+ld\\s+wa,\\s*(-?(?:0x[0-9a-f]+|[0-9][0-9a-f]*h|[0-9]+))\\s*(?:;.*)?$",
             Pattern.CASE_INSENSITIVE);
