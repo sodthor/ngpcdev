@@ -10,6 +10,7 @@
  * Function Prototypes contained within the library
  */
 void InitNGPC(void);
+void SysShutdown(void);
 void CpuSpeed(u8 spd);
 void SysPlayWave(u8 *wave);
 s32 Multiply32bit(s32 Value1, s32 Value2);

@@ -312,7 +312,11 @@ void transform3D(s16* x,s16* y,s16* z, s16* rx, s16* ry, u16 n)
 
 void clearMem()
 {
+#ifdef CLANG
+__ASM("	ld	xhl,07000h");
+#else
 __ASM("	ld	xhl,0x7000	");
+#endif
 __ASM("	xor	xwa,xwa		");
 __ASM("	ld	bc,64           ");
 __ASM("_clear_loop_:            ");
@@ -337,8 +341,13 @@ __ASM("	djnz	bc,_clear_loop_	");
 
 void copyMem()
 {
+#ifdef CLANG
+__ASM("	ld	xhl,07000h");
+__ASM("	ld	xde,0a000h");
+#else
 __ASM("	ld	xhl,0x7000	");
 __ASM("	ld	xde,0xa000	");
+#endif
 __ASM("	ld	bc,16*16*8      ");
 __ASM("	ldirw	(xde+),(xhl+)   ");
 }
@@ -1454,7 +1463,11 @@ void main()
     getSavedData();
 
     CpuSpeed(0);
+#ifdef CLANG
+    __ASM("    andb  (020h), 0f7h");
+#else
     __ASM("    and   (0x20), 0xf7"); // turn off timer 3
+#endif
     SOUNDCPU_CTRL = 0xaaaa;
 
     __asm(" di");

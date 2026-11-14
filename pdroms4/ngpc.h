@@ -4,6 +4,18 @@
 #ifndef _NGPC_H
 #define _NGPC_H
 
+#ifdef CLANG
+#define __interrupt
+#define __ASM __asm
+// The LLVM backend identifies ISR entry points by "Interrupt" in their name.
+#define DummyFunction DummyFunctionInterrupt
+#define myVBL myVBLInterrupt
+#define detectVBL detectVBLInterrupt
+#define wavLoopTimer0 wavLoopTimer0Interrupt
+#define wavTimer0 wavTimer0Interrupt
+#define clearScreen clearWireframeScreen
+#endif
+
 //////////////////////////////////////////////////////////////////////////////
 // types                                                                    //
 //////////////////////////////////////////////////////////////////////////////
@@ -25,8 +37,8 @@ typedef void __interrupt Interrupt();
 typedef void (*FuncPtr)(void);
 
 
-#define WATCHDOG			(*(u8*)0x006F)
-#define SOUNDCPU_CTRL       (*(u16 *)0x00b8)
+#define WATCHDOG			(*(volatile u8*)0x006F)
+#define SOUNDCPU_CTRL       (*(volatile u16 *)0x00b8)
 #define INT_ROM				(*(u8*)0xFF0000)
 #define CART_ROM			(*(u8*)0x200000)
 #define CHAR_RAM			(*(u8*)0xA000)
@@ -36,8 +48,8 @@ typedef void (*FuncPtr)(void);
 #define JOYPAD				(*(volatile u8*)0x6F82)
 #define SYS_LEVER			(*(u8*)0x6F82)
 #define USR_BOOT			(*(u8*)0x6F84)
-#define USR_SHUTDOWN		(*(u8*)0x6F85)
-#define USR_ANSWER			(*(u8*)0x6F86)
+#define USR_SHUTDOWN		(*(volatile u8*)0x6F85)
+#define USR_ANSWER			(*(volatile u8*)0x6F86)
 #define LANGUAGE			(*(u8*)0x6F87)
 #define OS_VERSION			(*(u8*)0x6F91)
 #define DISP_CTL0			(*(u8*)0x8000)
@@ -60,7 +72,7 @@ typedef void (*FuncPtr)(void);
 #define REF					(*(u8*)0x8006)
 #define BG_COL				(*(u8*)0x8118)
 #define RAS_H				(*(u8*)0x8008)
-#define RAS_Y				(*(u8*)0x8009)
+#define RAS_Y				(*(volatile u8*)0x8009)
 #define STATUS_2D			(*(u8*)0x8010)
 #define CONTROL_2D			(*(u8*)0x8012)
 #define BG_PAL				(*(u16*)0x83E0)

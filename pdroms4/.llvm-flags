@@ -1,0 +1,1 @@
+clang-22 -O1 trust-bios=true

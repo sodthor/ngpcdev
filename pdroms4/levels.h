@@ -23,7 +23,7 @@ const u8 levels[LEVEL_COUNT][16][16] =
 };
 
 #define MAX_LINES 64
-#define LINE_END 0xf000
+#define LINE_END ((s16)0xf000)
 
 const s16 lines[LEVEL_COUNT][4][MAX_LINES] =
 {

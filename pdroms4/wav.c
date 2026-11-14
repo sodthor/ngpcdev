@@ -18,7 +18,7 @@ __ASM("	jr	nz,wav_loopnotend");
 __ASM("	ld	xwa,(_START_SAMPLE)");
 __ASM("wav_loopnotend:");
 __ASM("	ld	(_SMPPTR),xwa");
-__ASM("	ld	(0xa2),bc");
+__ASM("	ld	(162),bc");
 __ASM("wav_loopout:");
 __ASM("	pop     bc");
 __ASM("	pop     xwa");
@@ -47,7 +47,7 @@ __ASM("	ld	(_SMPPTR),xwa");
 __ASM("	jr	wav_out");
 __ASM("wav_notend:");
 __ASM("	ld	(_SMPPTR),xwa");
-__ASM("	ld	(0xa2),bc");
+__ASM("	ld	(162),bc");
 __ASM("wav_out:");
 __ASM("	pop     bc");
 __ASM("	pop     xwa");
@@ -66,17 +66,17 @@ void wavPlayLoop(u8 *smp)
     SMPPTR=(u32)smp;
     START_SAMPLE=(u32)(smp+44);
     END_SAMPLE=(u32)(smp+44+length);
-__ASM("	andb	(0x20),0x8e");
-__ASM("	ldb	(0x24),0x2");
+__ASM("	andb	(32),142");
+__ASM("	ldb	(36),2");
     TI0_INT=wavLoopTimer0;
-__ASM("	orb	(0x20),0x01");
+__ASM("	orb	(32),1");
 }
 
 extern void __interrupt DummyFunction(void);
 
 void wavStop()
 {
-__ASM("	andb	(0x20),0x8e");
+__ASM("	andb	(32),142");
     TI0_INT=DummyFunction;
     SMPPTR=0;
     START_SAMPLE=0;
@@ -90,10 +90,10 @@ void wavPlay(u8 *smp)
     SMPPTR=(u32)(smp+44);
     START_SAMPLE=0;
     END_SAMPLE=(u32)(smp+44+length);
-__ASM("	andb	(0x20),0x8e");
-__ASM("	ldb	(0x24),0x2");
+__ASM("	andb	(32),142");
+__ASM("	ldb	(36),2");
     TI0_INT=wavTimer0;
-__ASM("	orb	(0x20),0x01");
+__ASM("	orb	(32),1");
 }
 
 void wavCheck()
